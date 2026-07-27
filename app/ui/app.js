@@ -12,6 +12,8 @@ const state = {
   settings: null,
   models: [],
   modelsDir: null,
+  /** { state: "ready", root } | { state: "missing", message, searched } */
+  openvino: null,
   devices: [],
   status: { phase: "idle" },
   sessions: [],
@@ -382,6 +384,11 @@ function selectedAudioLabel() {
 
 /** Warn about model/device combinations known to fail on this hardware. */
 function refreshModelNotice() {
+  // A missing runtime outranks everything: nothing can run at all.
+  if (state.openvino && state.openvino.state !== "ready") {
+    showNotice("error", state.openvino.message);
+    return;
+  }
   const model = selectedModel();
   if (!model) {
     clearNotice();
@@ -431,7 +438,12 @@ function renderStatus() {
   ui.statusText.textContent = bits.join("  ·  ");
 
   const recording = state.recordingId !== null;
-  if (phase === "finalizing") {
+  const runtimeReady = !state.openvino || state.openvino.state === "ready";
+  if (!runtimeReady) {
+    ui.toggle.textContent = "● 開始";
+    ui.toggle.disabled = true;
+    ui.toggle.classList.remove("recording");
+  } else if (phase === "finalizing") {
     ui.toggle.textContent = "処理中…";
     ui.toggle.disabled = true;
     ui.toggle.classList.remove("recording");
@@ -446,7 +458,7 @@ function renderStatus() {
   }
 
   const busy = recording || phase !== "idle";
-  ui.preload.disabled = busy || !selectedModel()?.usable;
+  ui.preload.disabled = busy || !runtimeReady || !selectedModel()?.usable;
   ui.model.disabled = busy || state.models.length === 0;
   ui.device.disabled = busy;
   ui.audio.disabled = busy;
@@ -565,6 +577,13 @@ function scheduleSidebarRefresh() {
 async function loadSettingsIntoDialog() {
   const s = state.settings;
   el("set-models-dir").value = state.modelsDir ?? "";
+  el("set-openvino-dir").value = s.openvinoDir ?? "";
+  const ov = state.openvino;
+  el("set-openvino-state").textContent = !ov
+    ? ""
+    : ov.state === "ready"
+      ? `— 検出済み: ${ov.root}`
+      : "— 見つかりません";
   el("set-language").value = s.language;
   el("set-max-segment").value = s.maxSegmentS;
   el("set-threshold").value = s.vadThreshold;
@@ -599,6 +618,23 @@ function wireEvents() {
     renderModels();
     refreshModelNotice();
     renderStatus();
+  };
+
+  el("pick-openvino-dir").onclick = async () => {
+    const picked = await window.__TAURI__.dialog.open({
+      directory: true,
+      title: "OpenVINO GenAI を展開したフォルダを選択",
+    });
+    if (!picked) return;
+    // Rejects a folder that is not an install, so the mistake surfaces now
+    // rather than as a silent failure on the next launch.
+    await call("set_openvino_dir", { dir: picked });
+    state.settings.openvinoDir = picked;
+    el("set-openvino-dir").value = picked;
+    showNotice(
+      "warn",
+      "OpenVINO の場所を保存しました。アプリを再起動すると反映されます。"
+    );
   };
 
   el("settings-dialog").addEventListener("close", async (event) => {
@@ -702,6 +738,11 @@ async function main() {
   wireEvents();
 
   state.settings = await call("get_settings");
+  state.openvino = await call("openvino_status");
+  if (state.openvino.state !== "ready") {
+    log("error", state.openvino.message);
+    for (const path of state.openvino.searched) log("info", `  探索: ${path}`);
+  }
   const listing = await call("list_models");
   state.modelsDir = listing.dir;
   state.models = listing.models;
@@ -728,7 +769,8 @@ async function main() {
   }
   renderStatus();
 
-  if (!state.modelsDir) {
+  // Don't paper over a missing runtime with a lesser warning.
+  if (!state.modelsDir && state.openvino?.state === "ready") {
     showNotice(
       "warn",
       "モデルフォルダが見つかりません。設定から models フォルダを指定してください。"

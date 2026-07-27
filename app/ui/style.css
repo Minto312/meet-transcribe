@@ -573,6 +573,11 @@ select option:disabled {
   font-size: 12px;
 }
 
+.dialog .row > span em {
+  color: var(--text-faint);
+  font-style: normal;
+}
+
 .dialog .row-inline {
   display: flex;
   gap: 6px;

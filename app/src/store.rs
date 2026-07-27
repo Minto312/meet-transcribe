@@ -35,6 +35,9 @@ use meet_transcribe::engine::{
 pub struct Settings {
     /// Directory scanned for OpenVINO IR model folders.
     pub models_dir: Option<PathBuf>,
+    /// Root of the OpenVINO GenAI install, when it is somewhere the app cannot
+    /// guess. Normally `None`: the usual locations are searched at startup.
+    pub openvino_dir: Option<PathBuf>,
     /// Name of the selected model folder inside `models_dir`.
     pub model: Option<String>,
     /// `NPU` | `GPU` | `CPU`
@@ -53,6 +56,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             models_dir: None,
+            openvino_dir: None,
             model: None,
             device: "NPU".to_string(),
             language: "ja".to_string(),

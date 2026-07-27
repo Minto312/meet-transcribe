@@ -12,6 +12,7 @@ use meet_transcribe::engine::{
 };
 
 use crate::models;
+use crate::openvino::OpenvinoStatus;
 use crate::store::{SegmentRecord, SessionStore, Settings};
 
 pub struct AppState {
@@ -19,6 +20,9 @@ pub struct AppState {
     pub store: SessionStore,
     pub settings: Mutex<Settings>,
     pub settings_path: PathBuf,
+    /// Whether the OpenVINO runtime was found at startup. Decided once, before
+    /// any thread exists, because resolving it mutates the process PATH.
+    pub openvino: Mutex<OpenvinoStatus>,
     /// Mirror of the last status pushed by the engine, so a freshly opened or
     /// reloaded window can ask for it instead of waiting for the next change.
     pub status: Mutex<EngineStatus>,
@@ -136,6 +140,12 @@ pub fn run() {
             let _ = settings.save(&settings_path);
 
             let store = SessionStore::new(data_dir.join("sessions"))?;
+
+            // Before any thread exists: this prepends to the process PATH so the
+            // delay-loaded OpenVINO import can resolve when the ASR thread first
+            // needs it.
+            let openvino = crate::openvino::prepare(settings.openvino_dir.as_deref());
+
             let (engine, events) = Engine::spawn();
 
             app.manage(AppState {
@@ -143,6 +153,7 @@ pub fn run() {
                 store,
                 settings: Mutex::new(settings),
                 settings_path,
+                openvino: Mutex::new(openvino),
                 status: Mutex::new(EngineStatus::default()),
             });
 
@@ -166,6 +177,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             crate::commands::get_settings,
             crate::commands::set_settings,
+            crate::commands::openvino_status,
+            crate::commands::set_openvino_dir,
             crate::commands::list_audio_devices,
             crate::commands::list_models,
             crate::commands::set_models_dir,

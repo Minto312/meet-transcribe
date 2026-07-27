@@ -6,7 +6,7 @@ and the OpenVINO installation is located automatically (explicit override:
 
 | script | purpose |
 |---|---|
-| `run_gui.ps1` | **Launch the GUI** with OpenVINO on `PATH` (it cannot be double-clicked; see below). `-Build` compiles it first |
+| `run_gui.ps1` | Launch the GUI with OpenVINO explicitly on `PATH`. Not normally needed — the app finds the runtime itself (see below) — but it is the override when the install is somewhere unusual. `-Build` compiles it first |
 | `get_model.ps1` | Download an OpenVINO IR Whisper model straight from Hugging Face — **no Python / `huggingface-cli` needed**. `-Repo OpenVINO/whisper-medium-int8-ov` |
 | `make_sample_wav.ps1` | Generate a 16 kHz mono Japanese test clip with the built-in Windows TTS voice |
 | `prove_npu.ps1` | Run the benchmark **while sampling NPU/iGPU utilization**, so the result can be attributed to a device. `-Device NPU -Model models\whisper-medium-int8-ov` |
@@ -25,13 +25,16 @@ cargo build --release
 .\scripts\load_test.ps1  -Device NPU     # then -Device GPU, and compare
 ```
 
-## Why the GUI needs a launcher
+## When you need `run_gui.ps1`
 
-`meet-transcribe-app.exe` links against `openvino_genai_c.dll`, so the OpenVINO
-DLLs must resolve when Windows loads the process — before any of the app's own
-code runs, which means the app cannot fix its own `PATH`. Double-clicking the exe
-fails with a loader error. `run_gui.ps1` sources `setupvars.bat` first and then
-launches the window detached, so the shell is not held open.
+Usually never: `meet-transcribe-app.exe` imports `openvino_genai_c.dll` with
+`/DELAYLOAD`, so it starts before the DLL has to resolve, locates the OpenVINO
+install and prepends the same directories to `PATH` that `setupvars.bat` would.
+
+Reach for the script when the install is somewhere the search does not look, or
+to pin a specific one with `-OpenVinoRoot`. (Version v0.1.0 of the GUI *did*
+require it: the import was load-time, so the process died at load with
+`0xC00004BC` and no message.)
 
 ## Why "prove" the NPU
 
