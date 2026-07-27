@@ -443,9 +443,21 @@ All on the reference machine (2026-07-27), over SSH, with no desktop session:
 | `--selftest` through that runtime | pipeline constructs on CPU — so the 24-file subset is genuinely sufficient |
 | update check, feed not newer | reports no update |
 | update check, feed newer | finds it without `--force` |
-| download + signature | 9,015,780 B, verified against the compiled-in public key |
+| download + signature | verified against the compiled-in public key |
 | tampered signature | rejected before anything is installed, exit 1 |
 | install | hands over to NSIS and exits 0 |
+
+The last four were done twice: once against a local feed, and then again with the
+**release** binary against the **published** one — no `--endpoint` override, the
+URL in `tauri.conf.json`, the asset downloaded from GitHub:
+
+```
+current version: 0.2.0
+endpoint: (tauri.conf.json)
+check -> 0.2.0 available (from https://github.com/…/v0.2.0/meet-transcribe_0.2.0_x64-setup.exe)
+download -> 9011281 bytes, signature verified against the compiled-in pubkey
+install -> starting the NSIS installer (this process exits now)
+```
 
 Two gaps, stated rather than papered over: the installer's `/R` relaunch after a
 self-update was not observed (nothing can launch a window on that machine), and
