@@ -61,18 +61,46 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
 `src/engine.rs` wraps that pipeline in the threading a window needs (see
 [The GUI](#the-gui)); `live` still drives the pieces directly in one loop.
 
+## Install
+
+Grab **`meet-transcribe_<version>_x64-setup.exe`** from
+[Releases](https://github.com/Minto312/meet-transcribe/releases/latest) and run
+it. It installs per-user — no administrator prompt — and adds a Start menu
+entry. From then on the app updates itself (see [Updates](#updates)).
+
+The installer is a few MB because it contains only the app. The two large
+dependencies are fetched on first launch, by the app, into its own data
+directory:
+
+| | size | from |
+|---|---|---|
+| OpenVINO GenAI runtime | 230 MB download → 222 MB on disk | Intel's official storage |
+| a Whisper model | 49 MB (tiny) … 784 MB (medium) | Hugging Face |
+
+That split is deliberate. Bundling them would put a quarter of a gigabyte into
+**every** update, and the model is a choice — see
+[First run](#first-run-what-the-app-downloads).
+
 ## Requirements
 
-- **Windows 11** (WASAPI loopback; the `live`/`capture_probe` binaries are Windows-only)
+To **run** the installed app:
+
+- **Windows 11** (WASAPI loopback), and **WebView2**, which ships with it
 - **Intel Core Ultra** (Meteor Lake or newer) with the **Intel AI Boost** NPU,
-  driver **32.0.100.3104+** — verified on **32.0.100.4724**
-- **OpenVINO GenAI runtime 2025.2+** (verified on **2026.2.1**) — download the
-  **GenAI** archive, not the plain runtime archive; see
-  [notes/environment.md](notes/environment.md#which-openvino-archive-to-download)
+  driver **32.0.100.3104+** — verified on **32.0.100.4724**. Without an NPU the
+  app still runs on the iGPU or the CPU.
+- Nothing else: no OpenVINO install, no Python, no Node.
+
+To **build** it:
+
 - **Rust** (stable, MSVC toolchain) + **VS Build Tools** (VCTools workload)
-- For the GUI: **WebView2**, which ships with Windows 11. Nothing else — the
-  front end is static files with no build step, so **no Node toolchain**.
-- No Python required.
+- **OpenVINO GenAI runtime 2025.2+** (verified on **2026.2.1**) — the
+  **GenAI** archive, not the plain runtime archive, because
+  `openvino-genai-sys` links against `openvino_genai.lib`; see
+  [notes/environment.md](notes/environment.md#which-openvino-archive-to-download)
+- **Tauri CLI** (`cargo install tauri-cli --locked --version "^2"`) — only to
+  build the installer, not for `cargo build`
+- Still no Node: the front end is static files with no build step.
 
 ## Quick start
 
@@ -80,7 +108,8 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
 # 1. Point the build at OpenVINO (once per shell)
 & "C:\path\to\openvino_genai_windows_<ver>_x86_64\setupvars.bat"
 
-# 2. Get a model — official OpenVINO conversions only (see the warning below)
+# 2. Get a model — official OpenVINO conversions only (see the warning below).
+#    Or skip this and let the GUI's setup panel do it.
 .\scripts\get_model.ps1 -Repo OpenVINO/whisper-medium-int8-ov
 
 # 3a. The GUI
@@ -90,6 +119,9 @@ cargo build --release -p meet-transcribe-app
 # 3b. …or the CLI
 cargo build --release
 cargo run --release --bin live -- --model models\whisper-medium-int8-ov --device NPU
+
+# 3c. …or the installer
+.\scripts\release.ps1
 ```
 
 `live` prints `[1/3] … [3/3]` as it compiles the model, initializes the VAD, and
@@ -115,10 +147,10 @@ A [Tauri](https://tauri.app/) window over the same pipeline: pick a model, pick
 `NPU`/`GPU`/`CPU`, pick which audio endpoint to listen to, press start. Every run
 is saved automatically and stays in a sidebar.
 
-Just run the exe. It finds the OpenVINO install itself — `INTEL_OPENVINO_DIR`,
-then the usual places an archive gets extracted to (`C:\ov-genai`, `C:\openvino`,
-`C:\Program Files\Intel`, next to the exe, …) — and prepends the same
-directories to `PATH` that `setupvars.bat` would.
+Just run the exe. It finds the OpenVINO install itself — its own download first,
+then `INTEL_OPENVINO_DIR`, then the usual places an archive gets extracted to
+(`C:\ov-genai`, `C:\openvino`, `C:\Program Files\Intel`, next to the exe, …) —
+and prepends the same directories to `PATH` that `setupvars.bat` would.
 
 That is only possible because `openvino_genai_c.dll` is linked with
 `/DELAYLOAD`. With an ordinary load-time import the Windows loader resolves it
@@ -170,10 +202,22 @@ Three consequences worth knowing:
 - **Stopping drains rather than truncates.** The run stays in *残りを処理中*
   until every captured utterance has been through the ASR, then closes.
 
-### Where transcripts go
+### Where things go
 
-`%APPDATA%\com.minto312.meet-transcribe\sessions\<timestamp>.jsonl`, one
-append-only file per run: a `meta` line, then one line per utterance, then an
+Transcripts and settings are in the **roaming** profile, where they have always
+been; the downloads are hundreds of megabytes of machine-specific binaries and
+go in the **local** one, which is also what keeps them out of every update.
+
+```
+%APPDATA%\com.minto312.meet-transcribe\
+  settings.json
+  sessions\<timestamp>.jsonl
+%LOCALAPPDATA%\com.minto312.meet-transcribe\
+  openvino\openvino_genai_windows_<ver>_x86_64\runtime\...
+  models\whisper-medium-int8-ov\...
+```
+
+One append-only file per run: a `meta` line, then one line per utterance, then an
 `end` line. Each utterance is on disk before it appears in the window, so a
 crash costs nothing; a file with no `end` line is just an interrupted session and
 reads back fine. *書き出し* renders one as Markdown, *コピー* puts the same on the
@@ -199,6 +243,128 @@ are explained in the next section.
   first-run failures that are hard to diagnose without a desktop session.
 - **Loopback *or* microphone, not both at once.** Mixing two WASAPI streams
   needs clock-drift handling between endpoints; picking one is honest and works.
+- **The runtime and the models are downloaded, not bundled.** See
+  [First run](#first-run-what-the-app-downloads).
+- **The updater is driven from Rust**, not from the plugin's JS bindings. The
+  window is a view; one place that talks to the network is easier to verify than
+  two, and it is what makes `--update-check` possible on a machine with no
+  desktop.
+
+## First run: what the app downloads
+
+The window opens straight into a setup panel whenever the runtime or a model is
+missing, and a banner keeps saying so until both are there. Two steps:
+
+1. **OpenVINO GenAI runtime.** The pinned archive (`2026.2.1.0`) is fetched from
+   `storage.openvinotoolkit.org`, and **24 of its 1448 entries** are unpacked:
+   `runtime/bin/intel64/Release/` and `runtime/3rdparty/tbb/bin/`, minus the
+   `*_debug.dll`. That is 222 MB instead of the 873 MB a full extraction would
+   cost — everything else in the archive is headers, import libraries, cmake
+   files, Python bindings and samples, which matter only when *building* against
+   OpenVINO. The zip is deleted afterwards.
+
+   Two things are checked rather than assumed, both of them
+   [recorded traps](notes/environment.md#which-openvino-archive-to-download): the
+   archive's exact byte count (the storage host answers **HTTP 200 with an HTML
+   page** for a path that does not exist, so a wrong URL would otherwise surface
+   much later as a corrupt zip), and that
+   `runtime\bin\intel64\Release\openvino_genai_c.dll` exists once unpacked.
+
+   No restart is needed afterwards. `openvino::prepare` runs a second time, which
+   prepends the new directories to `PATH` and loads the DLL to prove the
+   delay-loaded import can now resolve.
+
+2. **A model.** The picker offers the official conversions with their real sizes
+   and what each costs on the NPU, `medium` marked as recommended because it is
+   the largest one the NPU runs. Files are fetched from the Hugging Face API the
+   same way `scripts/get_model.ps1` does it, skipped when already present at the
+   expected size, so an interrupted download resumes at file granularity.
+
+Both run on one worker thread at a time, report progress as
+`mt://setup-progress`, and can be cancelled. A model lands in whatever folder the
+model picker points at, so keeping models on another drive does not produce two
+copies.
+
+Neither is something a screenshot can check either, so both can be run from a
+console — through the same commands and the same event stream the window uses:
+
+```powershell
+.\meet-transcribe-app.exe --setup openvino
+.\meet-transcribe-app.exe --setup OpenVINO/whisper-tiny-int8-ov
+```
+
+## Updates
+
+The app checks its release feed a few seconds after launch, and again whenever
+*更新を確認* is pressed in the settings dialog. When something newer exists, a
+banner offers it; accepting it downloads the installer, verifies its signature,
+and hands over to NSIS, which replaces the files and relaunches the app.
+
+```
+plugins.updater.endpoints
+  └─ https://github.com/Minto312/meet-transcribe/releases/latest/download/latest.json
+       └─ platforms."windows-x86_64".url  -> meet-transcribe_<ver>_x64-setup.exe
+                                signature -> minisign, verified before install
+```
+
+The signature is not decoration: the public key is compiled into the binary and
+the payload is rejected outright if it does not match, so the update path cannot
+be redirected by whoever controls the network. Being offline is *not* treated as
+an error — a laptop is offline all the time, and the failed check goes to the log
+panel rather than to a red banner.
+
+Nothing in `%LOCALAPPDATA%` is touched by an update, so the 222 MB runtime and the
+784 MB model survive it. That is the whole reason they are not bundled.
+
+### Verifying the update path without a desktop
+
+The interesting half of an updater is what happens *after* the check, and none of
+it is visible in a screenshot. So the binary can drive itself:
+
+```powershell
+# is the feed reachable and does latest.json parse?
+.\meet-transcribe-app.exe --update-check
+
+# download it and verify the signature, even if it is not newer than what is
+# running -- this is what proves the signing key matches the compiled-in pubkey
+.\meet-transcribe-app.exe --update-check --force
+
+# ... and actually run the installer
+.\meet-transcribe-app.exe --update-check --force --apply
+
+# ... against a feed that is not the configured one
+.\meet-transcribe-app.exe --update-check --endpoint https://example/latest.json
+```
+
+The report goes to `%TEMP%\meet-transcribe-update-check.txt` as well as stdout,
+because a release build is `windows_subsystem = "windows"` and has nowhere to
+print. Exit code 0 means every stage it attempted worked.
+
+## Releasing
+
+```powershell
+# once per machine: the signing key. Losing it means no more updates for
+# anyone who already installed, so back it up somewhere that is not this repo.
+cargo tauri signer generate --ci -w $env:USERPROFILE\.tauri\meet-transcribe.key
+# put the contents of ...\meet-transcribe.key.pub into
+# tauri.conf.json > plugins > updater > pubkey
+
+# per release: bump the version in tauri.conf.json AND both Cargo.toml files
+# (release.ps1 refuses to build if they disagree), then
+.\scripts\release.ps1
+gh release create v0.2.0 --title v0.2.0 --notes-file NOTES.md `
+  target\release\bundle\nsis\meet-transcribe_0.2.0_x64-setup.exe `
+  target\release\bundle\nsis\latest.json
+```
+
+`release.ps1` builds the NSIS bundle with `cargo tauri build --ci`, which signs
+the installer because `bundle.createUpdaterArtifacts` is true, and then writes the
+`latest.json` the updater expects. The `releases/latest/download/` URL always
+resolves to the newest non-prerelease, so uploading those two files *is* the
+publish step.
+
+`--ci` matters twice: the signing key has no passphrase, and without `--ci` the
+bundler prompts for one on stdin — which hangs a non-interactive session forever.
 
 ## Things that will bite you
 
@@ -264,6 +430,28 @@ Rough edges, honestly stated:
   confirmed to run, but has not been clicked through by hand — the reference
   machine is driven over SSH, which has no interactive desktop.
 
+### What the installer and the updater were tested against
+
+All on the reference machine (2026-07-27), over SSH, with no desktop session:
+
+| | result |
+|---|---|
+| `scripts/release.ps1` | 8.6 MB signed installer + `.sig` + `latest.json` |
+| silent install (`/S`) | per-user in `%LOCALAPPDATA%\meet-transcribe`, `DisplayVersion 0.2.0`, Start menu shortcut, `uninstall.exe`, no elevation |
+| `--setup OpenVINO/whisper-tiny-int8-ov` | 20 files / 48.8 MB; a second run skips what is already there |
+| `--setup openvino` | 229,626,351 B fetched, 24 files / 222,513,665 B unpacked, no `*_debug.dll`, the zip deleted afterwards |
+| `--selftest` through that runtime | pipeline constructs on CPU — so the 24-file subset is genuinely sufficient |
+| update check, feed not newer | reports no update |
+| update check, feed newer | finds it without `--force` |
+| download + signature | 9,015,780 B, verified against the compiled-in public key |
+| tampered signature | rejected before anything is installed, exit 1 |
+| install | hands over to NSIS and exits 0 |
+
+Two gaps, stated rather than papered over: the installer's `/R` relaunch after a
+self-update was not observed (nothing can launch a window on that machine), and
+an upgrade *between two different versions* has not been run — only a reinstall
+of the same one over itself.
+
 ## Layout
 
 ```
@@ -277,8 +465,11 @@ src/bin/{live,bench,diag,capture_probe,engine_probe}.rs
 app/                       the Tauri GUI (its own package in the workspace)
   app/src/                 state, engine->webview bridge, commands, session store
   app/src/openvino.rs      locating the runtime at startup (see the GUI section)
+  app/src/setup.rs         downloading the runtime and the models on first run
+  app/src/update.rs        checking, verifying and installing updates
   app/ui/                  static front end — no bundler, no Node
 scripts/                   setup + measurement (PowerShell) — see scripts/README.md
+scripts/release.ps1        the signed installer + the updater manifest
 notes/                     benchmark results and environment facts
 export_model.py            optional: convert a model yourself with optimum-intel
 reference-python/          the Python prototype this was ported from, kept for

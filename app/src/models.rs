@@ -64,6 +64,14 @@ pub fn scan(dir: &Path) -> Vec<ModelInfo> {
     out
 }
 
+/// Whether `dir` holds a model a `WhisperPipeline` would accept.
+///
+/// Used by the setup panel to decide what is already downloaded, and by the
+/// downloader to refuse to call a half-finished directory a model.
+pub fn is_usable(dir: &Path) -> bool {
+    inspect(dir).is_some_and(|info| info.usable)
+}
+
 fn inspect(path: &Path) -> Option<ModelInfo> {
     let name = path.file_name()?.to_string_lossy().into_owned();
 

@@ -35,6 +35,26 @@
           </div>
         </header>
 
+        <!-- Shown until the runtime and at least one model are in place, and
+             again whenever a newer release is published. -->
+        <div id="banners" class="banners">
+          <div id="setup-banner" class="banner hidden">
+            <div class="banner-body">
+              <strong id="setup-banner-title">セットアップが必要です</strong>
+              <span id="setup-banner-text" class="banner-text"></span>
+            </div>
+            <button id="open-setup" class="primary small">セットアップ</button>
+          </div>
+          <div id="update-banner" class="banner update hidden">
+            <div class="banner-body">
+              <strong id="update-banner-title">新しいバージョンがあります</strong>
+              <span id="update-banner-text" class="banner-text"></span>
+            </div>
+            <button id="update-later" class="ghost small">あとで</button>
+            <button id="update-now" class="primary small">更新して再起動</button>
+          </div>
+        </div>
+
         <section id="transcript" class="transcript" aria-live="polite">
           <div class="empty" id="empty-state">
             <p class="empty-title">まだ文字起こしはありません</p>
@@ -82,6 +102,55 @@
         </footer>
       </main>
     </div>
+
+    <!-- Not a <form>: every button here runs a command instead of submitting,
+         and the dialog stays open while a download runs. -->
+    <dialog id="setup-dialog" class="dialog wide">
+      <div class="dialog-body">
+        <h2>セットアップ</h2>
+        <p class="hint tight">
+          インストーラーにはアプリ本体だけが入っています。文字起こしに必要な
+          OpenVINO ランタイムとモデルはここから取得します。取得先は
+          <code id="setup-target-dir"></code> で、アプリを更新しても消えません。
+        </p>
+
+        <section id="step-openvino" class="step">
+          <div class="step-head">
+            <span class="step-no">1</span>
+            <div class="step-title">
+              <strong>OpenVINO GenAI ランタイム</strong>
+              <span id="ov-state" class="muted"></span>
+            </div>
+            <button id="ov-download" class="primary small">ダウンロード</button>
+          </div>
+          <div id="ov-progress" class="progress hidden">
+            <div id="ov-progress-fill" class="progress-fill"></div>
+          </div>
+          <p id="ov-progress-text" class="progress-text"></p>
+        </section>
+
+        <section id="step-model" class="step">
+          <div class="step-head">
+            <span class="step-no">2</span>
+            <div class="step-title">
+              <strong>文字起こしモデル</strong>
+              <span id="model-state" class="muted"></span>
+            </div>
+          </div>
+          <div id="catalog" class="catalog"></div>
+          <div id="model-progress" class="progress hidden">
+            <div id="model-progress-fill" class="progress-fill"></div>
+          </div>
+          <p id="model-progress-text" class="progress-text"></p>
+        </section>
+
+        <menu>
+          <button id="setup-cancel" class="ghost danger hidden">ダウンロードを中止</button>
+          <span class="spacer"></span>
+          <button id="setup-close" class="primary">閉じる</button>
+        </menu>
+      </div>
+    </dialog>
 
     <dialog id="settings-dialog" class="dialog">
       <form method="dialog">
@@ -134,9 +203,19 @@
           <span>各発話に長さと RTF を表示する</span>
         </label>
 
+        <div class="row split">
+          <span>バージョン <em id="set-version"></em></span>
+          <span class="row-inline">
+            <button id="check-update" type="button" class="ghost">更新を確認</button>
+            <button id="open-setup-from-settings" type="button" class="ghost">セットアップ</button>
+          </span>
+        </div>
+        <p id="update-state" class="muted"></p>
+
         <p class="hint">
-          OpenVINO は通常フォルダ指定なしで自動検出されます。見つからないときだけ、
-          GenAI アーカイブ (openvino_genai_windows_&lt;version&gt;_x86_64) を展開したフォルダを
+          OpenVINO は通常フォルダ指定なしで自動検出されます。セットアップから
+          ダウンロードした場合もここは空のままです。手動で展開したものを使うときだけ、
+          GenAI アーカイブ (openvino_genai_windows_&lt;version&gt;_x86_64) のフォルダを
           指定してください。変更は次回起動時から反映されます。
         </p>
 

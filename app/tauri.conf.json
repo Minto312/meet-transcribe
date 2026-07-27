@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "meet-transcribe",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "identifier": "com.minto312.meet-transcribe",
   "build": {
     "frontendDist": "ui"
@@ -27,8 +27,30 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
     "publisher": "Minto312",
-    "copyright": "MIT"
+    "copyright": "MIT",
+    "shortDescription": "Windows のデスクトップ音声をリアルタイムに日本語で文字起こしする",
+    "longDescription": "WASAPI ループバックで拾ったシステム音声を Silero VAD で区切り、OpenVINO GenAI の Whisper を Intel NPU / iGPU / CPU で走らせて日本語に文字起こしします。OpenVINO ランタイムと文字起こしモデルは初回起動時にアプリがダウンロードします。",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Japanese", "English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVEN0Y2RjBDMkJFREJFNDcKUldSSHZ1MHJERzkvWFM3cUlxU0dJTTYwL1pTYm5seUhMV29veWFHc3Y2ekVVVDRUUmtJUEo4d0QK",
+      "endpoints": [
+        "https://github.com/Minto312/meet-transcribe/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

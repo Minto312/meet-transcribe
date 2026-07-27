@@ -10,6 +10,10 @@
 //! stub raises a structured exception and the process dies with no message. So
 //! we load it eagerly here, keep the handle, and if that fails we say so in the
 //! window instead of letting the user press 開始 into a crash.
+//!
+//! Three kinds of install are searched, best first: the one the app downloaded
+//! itself (see `setup.rs`), the one the user pointed at in settings, and the
+//! usual places somebody unpacks the archive by hand.
 
 use std::path::{Path, PathBuf};
 
@@ -36,13 +40,23 @@ pub enum OpenvinoStatus {
     Missing { message: String, searched: Vec<String> },
 }
 
+impl OpenvinoStatus {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
 /// A directory is an OpenVINO install if it holds the DLL we import.
-fn is_install_root(root: &Path) -> bool {
+pub fn is_install_root(root: &Path) -> bool {
     root.join(r"runtime\bin\intel64\Release").join(DLL).is_file()
 }
 
 /// Every place worth looking, best guess first.
-fn candidate_roots(hint: Option<&Path>) -> Vec<PathBuf> {
+///
+/// `managed` is the directory the app unpacks the runtime into; it holds a
+/// versioned subdirectory rather than being an install root itself, and is
+/// searched first so an app-installed runtime beats a stale hand-unpacked one.
+fn candidate_roots(hint: Option<&Path>, managed: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     let mut push = |path: PathBuf| {
         if !roots.contains(&path) {
@@ -63,16 +77,21 @@ fn candidate_roots(hint: Option<&Path>) -> Vec<PathBuf> {
         }
     }
 
-    // 3. The usual places an archive gets extracted to. Each base is tried both
-    //    as an install root and as a parent of versioned subdirectories, since
-    //    the archive unpacks to openvino_genai_windows_<version>_x86_64/.
-    let mut bases: Vec<PathBuf> = vec![
+    // 3. The app's own download, then the usual places an archive gets extracted
+    //    to. Each base is tried both as an install root and as a parent of
+    //    versioned subdirectories, since the archive unpacks to
+    //    openvino_genai_windows_<version>_x86_64/.
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(managed) = managed {
+        bases.push(managed.to_path_buf());
+    }
+    bases.extend([
         PathBuf::from(r"C:\ov-genai"),
         PathBuf::from(r"C:\openvino"),
         PathBuf::from(r"C:\Program Files\Intel"),
         PathBuf::from(r"C:\Program Files (x86)\Intel"),
         PathBuf::from(r"C:\Intel"),
-    ];
+    ]);
     for var in ["USERPROFILE", "LOCALAPPDATA"] {
         if let Ok(dir) = std::env::var(var) {
             bases.push(PathBuf::from(&dir));
@@ -123,8 +142,11 @@ fn prepend_to_path(root: &Path) {
         .collect();
     joined.extend(std::env::split_paths(&existing));
     if let Ok(path) = std::env::join_paths(joined) {
-        // Safe here: called before any other thread is spawned, and the Windows
-        // loader reads PATH from the process environment block on each search.
+        // Safe on Windows even once threads exist: this lowers to
+        // SetEnvironmentVariableW, which the OS serialises, and the loader
+        // re-reads PATH from the process environment block on every search.
+        // (`prepare` is called again after the runtime is downloaded, at which
+        // point the engine threads are already up.)
         std::env::set_var("PATH", path);
     }
 }
@@ -146,8 +168,10 @@ fn load_dll() -> Result<(), String> {
 
 /// Make `openvino_genai_c.dll` loadable, or explain why it is not.
 ///
-/// Call this before spawning anything: it mutates the process environment.
-pub fn prepare(hint: Option<&Path>) -> OpenvinoStatus {
+/// Call this before spawning anything at startup: it mutates the process
+/// environment. It is also called again after `setup.rs` downloads the runtime,
+/// which is what lets the first run start transcribing without a restart.
+pub fn prepare(hint: Option<&Path>, managed: Option<&Path>) -> OpenvinoStatus {
     // Launched through run_gui.ps1, or OpenVINO is on the system PATH already.
     if load_dll().is_ok() {
         return OpenvinoStatus::Ready {
@@ -155,7 +179,7 @@ pub fn prepare(hint: Option<&Path>) -> OpenvinoStatus {
         };
     }
 
-    let candidates = candidate_roots(hint);
+    let candidates = candidate_roots(hint, managed);
     for root in &candidates {
         if !is_install_root(root) {
             continue;
@@ -171,8 +195,9 @@ pub fn prepare(hint: Option<&Path>) -> OpenvinoStatus {
     OpenvinoStatus::Missing {
         message: format!(
             "OpenVINO GenAI ランタイムが見つかりません ({DLL} を読み込めませんでした)。\
-             GenAI アーカイブ (openvino_genai_windows_<version>_x86_64) を展開し、\
-             設定でそのフォルダを指定してください。"
+             セットアップからダウンロードするか、GenAI アーカイブ \
+             (openvino_genai_windows_<version>_x86_64) を展開して設定でそのフォルダを\
+             指定してください。"
         ),
         searched: candidates
             .iter()
