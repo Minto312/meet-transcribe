@@ -13,19 +13,26 @@ use meet_transcribe::engine::{
 
 use crate::models;
 use crate::openvino::OpenvinoStatus;
+use crate::setup::{self, Paths, SetupState};
 use crate::store::{SegmentRecord, SessionStore, Settings};
+use crate::update;
 
 pub struct AppState {
     pub engine: Engine,
     pub store: SessionStore,
     pub settings: Mutex<Settings>,
     pub settings_path: PathBuf,
-    /// Whether the OpenVINO runtime was found at startup. Decided once, before
-    /// any thread exists, because resolving it mutates the process PATH.
+    /// Whether the OpenVINO runtime was found. Decided at startup, before any
+    /// thread exists, because resolving it mutates the process PATH — and
+    /// decided again if the setup panel downloads it (see `setup.rs`).
     pub openvino: Mutex<OpenvinoStatus>,
     /// Mirror of the last status pushed by the engine, so a freshly opened or
     /// reloaded window can ask for it instead of waiting for the next change.
     pub status: Mutex<EngineStatus>,
+    /// Downloads of the OpenVINO runtime and the Whisper models.
+    pub setup: SetupState,
+    /// Result of the last update check, so installing does not re-ask the feed.
+    pub pending_update: update::Pending,
 }
 
 impl AppState {
@@ -76,7 +83,7 @@ fn bridge(app: AppHandle, events: Receiver<EngineEvent>) {
                         Err(e) => {
                             let _ = app.emit(
                                 "mt://log",
-                                LogRecord::error(format!("セッションの保存に失敗しました: {e:#}")),
+                                LogRecord::error(format!("セッションの保存に失敗しました: {e}")),
                             );
                         }
                     }
@@ -115,7 +122,7 @@ fn bridge(app: AppHandle, events: Receiver<EngineEvent>) {
                 Err(e) => {
                     let _ = app.emit(
                         "mt://log",
-                        LogRecord::error(format!("文字起こしの保存に失敗しました: {e:#}")),
+                        LogRecord::error(format!("文字起こしの保存に失敗しました: {e}")),
                     );
                 }
             },
@@ -123,19 +130,36 @@ fn bridge(app: AppHandle, events: Receiver<EngineEvent>) {
     }
 }
 
-pub fn run() {
+/// What every entry point shares: state, plugins, commands.
+///
+/// `on_ready` runs once the app is built. The window does the normal thing; the
+/// `--update-check` probe uses it to drive the updater from a console and exit.
+fn build(on_ready: impl FnOnce(&AppHandle) + Send + 'static) -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .setup(|app| {
+        // Configured entirely from `tauri.conf.json` (`plugins > updater`); the
+        // app talks to it from Rust, so no ACL permission is needed.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(move |app| {
+            // Transcripts and settings stay in the roaming profile, where they
+            // have always been. The downloads are hundreds of megabytes of
+            // machine-specific binaries and belong in the local one.
             let data_dir = app.path().app_data_dir()?;
+            let local_dir = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            let paths = Paths::new(&local_dir);
+            std::fs::create_dir_all(&paths.models)?;
 
             let settings_path = data_dir.join("settings.json");
             let mut settings = Settings::load(&settings_path);
             if settings.models_dir.is_none() {
-                settings.models_dir = models::guess_models_dir();
+                // In a checkout this finds the repository's own models/; an
+                // installed copy has none, and falls back to the folder the
+                // setup panel downloads into.
+                settings.models_dir =
+                    Some(models::guess_models_dir().unwrap_or_else(|| paths.models.clone()));
             }
             let _ = settings.save(&settings_path);
 
@@ -144,7 +168,8 @@ pub fn run() {
             // Before any thread exists: this prepends to the process PATH so the
             // delay-loaded OpenVINO import can resolve when the ASR thread first
             // needs it.
-            let openvino = crate::openvino::prepare(settings.openvino_dir.as_deref());
+            let openvino =
+                crate::openvino::prepare(settings.openvino_dir.as_deref(), Some(&paths.openvino));
 
             let (engine, events) = Engine::spawn();
 
@@ -155,12 +180,16 @@ pub fn run() {
                 settings_path,
                 openvino: Mutex::new(openvino),
                 status: Mutex::new(EngineStatus::default()),
+                setup: SetupState::new(paths),
+                pending_update: Mutex::new(None),
             });
 
             let handle = app.handle().clone();
             std::thread::Builder::new()
                 .name("mt-bridge".to_string())
                 .spawn(move || bridge(handle, events))?;
+
+            on_ready(app.handle());
 
             Ok(())
         })
@@ -194,7 +223,132 @@ pub fn run() {
             crate::commands::session_markdown,
             crate::commands::save_session_as,
             crate::commands::sessions_dir,
+            crate::commands::setup_status,
+            crate::commands::download_openvino,
+            crate::commands::download_model,
+            crate::commands::cancel_setup,
+            crate::commands::app_version,
+            crate::commands::check_update,
+            crate::commands::install_update,
         ])
         .run(tauri::generate_context!())
+}
+
+pub fn run() {
+    build(|app| update::spawn_startup_check(app.clone()))
         .expect("meet-transcribe GUI の起動に失敗しました");
+}
+
+/// `--setup <openvino|OpenVINO/whisper-…>`: run one setup download from a
+/// console and exit.
+///
+/// Drives the same commands the window does — `setup::start_openvino` /
+/// `start_model` — and follows the run by subscribing to the same
+/// `mt://setup-progress` events the front end gets, so what this proves is the
+/// production path and not a parallel one. That matters for the extraction in
+/// particular: picking 24 entries out of 1448 by prefix is exactly the kind of
+/// thing that keeps working right up until the archive is reorganised.
+pub fn run_setup_probe(target: String) -> ! {
+    use tauri::Listener;
+
+    let result = build(move |app| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("mt-setup-probe".to_string())
+            .spawn(move || {
+                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                app.listen("mt://setup-progress", move |event| {
+                    let _ = tx.send(event.payload().to_string());
+                });
+
+                let started = if target == "openvino" {
+                    setup::start_openvino(app.clone())
+                } else {
+                    setup::start_model(app.clone(), target.clone())
+                };
+                if let Err(error) = started {
+                    println!("start -> ERR {error}");
+                    std::process::exit(1);
+                }
+
+                // Progress is chatty by design; only the shape of it is
+                // interesting here, so print one line per percent.
+                let mut last = -1i64;
+                while let Ok(payload) = rx.recv() {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                        continue;
+                    };
+                    let phase = value["phase"].as_str().unwrap_or("");
+                    let received = value["received"].as_u64().unwrap_or(0);
+                    let total = value["total"].as_u64().unwrap_or(0);
+                    match phase {
+                        "download" | "extract" => {
+                            let percent = if total > 0 {
+                                (received as i64 * 100) / total as i64
+                            } else {
+                                -1
+                            };
+                            if percent != last {
+                                last = percent;
+                                println!(
+                                    "{phase}: {percent}% ({received} / {total}) files {} / {}",
+                                    value["filesDone"], value["filesTotal"]
+                                );
+                            }
+                        }
+                        "done" => {
+                            println!("done: {}", value["message"]);
+                            println!("VERDICT: setup path works.");
+                            std::process::exit(0);
+                        }
+                        other => {
+                            println!("{other}: {}", value["message"]);
+                            println!("VERDICT: FAILED");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                println!("VERDICT: FAILED (progress channel closed)");
+                std::process::exit(1);
+            })
+            .expect("プローブスレッドを起動できません");
+    });
+
+    if let Err(error) = result {
+        eprintln!("--setup を実行できません: {error}");
+    }
+    std::process::exit(1);
+}
+
+/// `--update-check`: drive the updater from a console and exit.
+///
+/// Runs inside a real app because the updater reads its configuration and its
+/// public key from the Tauri context. The window is hidden rather than skipped:
+/// it is declared in `tauri.conf.json`, so it exists before `setup` runs.
+pub fn run_update_probe(options: update::ProbeOptions) -> ! {
+    let result = build(move |app| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("mt-update-probe".to_string())
+            .spawn(move || {
+                let (status, report) = tauri::async_runtime::block_on(update::probe(&app, &options));
+                update::write_report(&report);
+                print!("{report}");
+                // Leaves the event loop where it stands, on purpose: a probe has
+                // no transcript to flush, and the exit code is the result.
+                std::process::exit(status);
+            })
+            .expect("プローブスレッドを起動できません");
+    });
+
+    if let Err(error) = result {
+        eprintln!("--update-check を実行できません: {error}");
+    }
+    std::process::exit(1);
 }

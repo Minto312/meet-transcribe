@@ -25,6 +25,13 @@ const state = {
   /** Summary backing the header, kept live while recording. */
   viewSummary: null,
   logs: [],
+  /** SetupStatus from Rust: what the app has downloaded and what it still needs. */
+  setup: null,
+  /** Newer release found by the updater, or null. */
+  update: null,
+  /** True from the moment 更新して再起動 is pressed until the process exits. */
+  updating: false,
+  version: "",
 };
 
 /** Placeholder title shown until the first utterance names the session. */
@@ -113,6 +120,11 @@ function showNotice(kind, message) {
 function clearNotice() {
   ui.notice.className = "notice hidden";
   ui.notice.textContent = "";
+}
+
+/** Bytes as MB, which is the only unit anything here is measured in. */
+function mb(bytes) {
+  return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 }
 
 // ------------------------------------------------------------------ sidebar
@@ -384,9 +396,10 @@ function selectedAudioLabel() {
 
 /** Warn about model/device combinations known to fail on this hardware. */
 function refreshModelNotice() {
-  // A missing runtime outranks everything: nothing can run at all.
+  // A missing runtime outranks everything, but the setup banner already says so
+  // and offers the fix; repeating it down here as an error is just noise.
   if (state.openvino && state.openvino.state !== "ready") {
-    showNotice("error", state.openvino.message);
+    clearNotice();
     return;
   }
   const model = selectedModel();
@@ -403,6 +416,203 @@ function refreshModelNotice() {
     return;
   }
   clearNotice();
+}
+
+// --------------------------------------------------------- setup and updates
+
+/** What is still missing, in the order the setup dialog asks for it. */
+function missingPieces() {
+  const missing = [];
+  if (state.openvino?.state !== "ready") missing.push("OpenVINO ランタイム");
+  if (!state.models.some((m) => m.usable)) missing.push("文字起こしモデル");
+  return missing;
+}
+
+function renderBanners() {
+  const setupBanner = el("setup-banner");
+  const missing = missingPieces();
+  setupBanner.classList.toggle("hidden", missing.length === 0);
+  if (missing.length > 0) {
+    el("setup-banner-text").textContent =
+      `${missing.join("と")}がまだありません。セットアップからダウンロードしてください。`;
+  }
+
+  const updateBanner = el("update-banner");
+  updateBanner.classList.toggle("hidden", !state.update);
+  if (state.update) {
+    el("update-banner-title").textContent = state.updating
+      ? "更新中…"
+      : `新しいバージョン ${state.update.version} があります`;
+    el("update-banner-text").textContent = state.updating
+      ? "ダウンロードが終わるとインストーラーが起動し、アプリが再起動します。"
+      : (state.update.notes ?? `現在 ${state.update.currentVersion}`).split("\n")[0];
+    el("update-now").disabled = state.updating;
+    el("update-later").disabled = state.updating;
+  }
+}
+
+function renderCatalog() {
+  const host = el("catalog");
+  host.replaceChildren();
+  if (!state.setup) return;
+
+  const busy = Boolean(state.setup.busy);
+  for (const entry of state.setup.catalog) {
+    const row = document.createElement("div");
+    row.className = "catalog-row";
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = entry.name;
+
+    const size = document.createElement("span");
+    size.className = "size";
+    size.textContent = `${entry.sizeMb} MB`;
+
+    const note = document.createElement("span");
+    note.className = "note";
+    note.textContent = entry.note;
+
+    row.append(name, size, note);
+
+    if (entry.recommended && !entry.installed) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "推奨";
+      row.append(tag);
+    }
+
+    const action = document.createElement("button");
+    action.className = entry.recommended ? "primary small" : "ghost small";
+    if (entry.installed) {
+      action.className = "ghost small";
+      action.textContent = "取得済み";
+      action.disabled = true;
+    } else {
+      action.textContent = "ダウンロード";
+      action.disabled = busy;
+      action.onclick = async () => {
+        await call("download_model", { repo: entry.repo });
+        await refreshSetup();
+      };
+    }
+    row.append(action);
+    host.append(row);
+  }
+}
+
+function renderSetupDialog() {
+  const setup = state.setup;
+  if (!setup) return;
+
+  el("setup-target-dir").textContent = setup.managedModelsDir;
+
+  const ready = setup.openvinoReady;
+  el("ov-state").textContent = ready
+    ? `取得済み — ${setup.openvinoRoot}`
+    : `未取得 — ${setup.openvinoSizeMb} MB (${setup.openvinoVersion}) をダウンロードします`;
+  el("ov-download").textContent = ready ? "再取得" : "ダウンロード";
+  el("ov-download").disabled = Boolean(setup.busy);
+  el("step-openvino").classList.toggle("done", ready);
+
+  const installed = setup.catalog.filter((entry) => entry.installed).length;
+  el("model-state").textContent =
+    installed > 0 ? `${installed} 件を取得済み` : "1 つ選んでダウンロードしてください";
+  el("step-model").classList.toggle("done", installed > 0);
+
+  el("setup-cancel").classList.toggle("hidden", !setup.busy);
+  renderCatalog();
+}
+
+/** Move one of the two progress bars, or clear it. */
+function renderSetupProgress(payload) {
+  const prefix = payload.task === "openvino" ? "ov" : "model";
+  const bar = el(`${prefix}-progress`);
+  const fill = el(`${prefix}-progress-fill`);
+  const text = el(`${prefix}-progress-text`);
+
+  const running = payload.phase === "download" || payload.phase === "extract";
+  bar.classList.toggle("hidden", !running);
+  text.classList.toggle("error", payload.phase === "error");
+
+  if (!running) {
+    fill.style.width = "0%";
+    text.textContent = payload.message ?? "";
+    return;
+  }
+
+  const percent = payload.total > 0 ? (payload.received / payload.total) * 100 : 0;
+  fill.style.width = `${Math.min(100, percent).toFixed(1)}%`;
+
+  const bits = [payload.phase === "extract" ? "展開中" : "ダウンロード中"];
+  if (payload.total > 0) {
+    bits.push(`${mb(payload.received)} / ${mb(payload.total)} (${percent.toFixed(0)}%)`);
+  } else {
+    bits.push(mb(payload.received));
+  }
+  if (payload.filesTotal > 1) {
+    bits.push(`${payload.filesDone} / ${payload.filesTotal} ファイル`);
+  }
+  if (payload.message) bits.push(payload.message);
+  text.textContent = bits.join("  ·  ");
+}
+
+async function refreshSetup() {
+  state.setup = await call("setup_status");
+  renderSetupDialog();
+  renderBanners();
+}
+
+/** Re-read the model list after a download, without disturbing the selection. */
+async function refreshModels() {
+  const listing = await call("list_models");
+  state.modelsDir = listing.dir;
+  state.models = listing.models;
+  renderModels();
+  refreshModelNotice();
+  renderStatus();
+}
+
+async function onSetupProgress(payload) {
+  renderSetupProgress(payload);
+  if (payload.phase === "download" || payload.phase === "extract") return;
+
+  // Terminal: the worker slot is free, so the buttons and the model list both
+  // need to catch up with what is now on disk.
+  if (payload.task === "model" && payload.phase === "done") await refreshModels();
+  await refreshSetup();
+}
+
+async function checkForUpdate({ quiet } = {}) {
+  const label = el("update-state");
+  if (!quiet) label.textContent = "確認中…";
+  try {
+    const found = await invoke("check_update");
+    state.update = found;
+    if (!quiet) {
+      label.textContent = found
+        ? `バージョン ${found.version} が利用できます。`
+        : `最新です (${state.version})。`;
+    }
+    renderBanners();
+  } catch (error) {
+    // Offline is the normal case for a laptop, not a red banner.
+    log("warn", String(error));
+    if (!quiet) label.textContent = String(error);
+  }
+}
+
+async function installUpdate() {
+  state.updating = true;
+  renderBanners();
+  try {
+    // Does not return when it works: the installer takes over and relaunches.
+    await invoke("install_update");
+  } catch (error) {
+    state.updating = false;
+    renderBanners();
+    showNotice("error", String(error));
+  }
 }
 
 // ------------------------------------------------------------------- status
@@ -590,6 +800,10 @@ async function loadSettingsIntoDialog() {
   el("set-silence").value = s.minSilenceMs;
   el("set-autoscroll").checked = s.autoScroll;
   el("set-metrics").checked = s.showMetrics;
+  el("set-version").textContent = state.version;
+  el("update-state").textContent = state.update
+    ? `バージョン ${state.update.version} が利用できます。`
+    : "";
 }
 
 function wireEvents() {
@@ -605,6 +819,34 @@ function wireEvents() {
     el("settings-dialog").showModal();
   };
 
+  const openSetup = async () => {
+    await refreshSetup();
+    el("setup-dialog").showModal();
+  };
+  el("open-setup").onclick = openSetup;
+  el("open-setup-from-settings").onclick = async () => {
+    el("settings-dialog").close();
+    await openSetup();
+  };
+  el("setup-close").onclick = () => el("setup-dialog").close();
+
+  el("ov-download").onclick = async () => {
+    await call("download_openvino");
+    await refreshSetup();
+  };
+
+  el("setup-cancel").onclick = async () => {
+    await call("cancel_setup");
+  };
+
+  el("check-update").onclick = () => checkForUpdate({});
+  el("update-now").onclick = () => installUpdate();
+  el("update-later").onclick = () => {
+    // Only for this run: the next launch checks again.
+    state.update = null;
+    renderBanners();
+  };
+
   el("pick-models-dir").onclick = async () => {
     const picked = await window.__TAURI__.dialog.open({
       directory: true,
@@ -618,6 +860,8 @@ function wireEvents() {
     renderModels();
     refreshModelNotice();
     renderStatus();
+    // The catalog's "取得済み" marks are per-folder, so they move with it.
+    await refreshSetup();
   };
 
   el("pick-openvino-dir").onclick = async () => {
@@ -737,10 +981,13 @@ function wireEvents() {
 async function main() {
   wireEvents();
 
+  state.version = await call("app_version");
   state.settings = await call("get_settings");
   state.openvino = await call("openvino_status");
   if (state.openvino.state !== "ready") {
-    log("error", state.openvino.message);
+    // Not an error the user has to act on any more: the setup panel can fix it,
+    // and the banner says so. The searched paths still belong in the log.
+    log("warn", state.openvino.message);
     for (const path of state.openvino.searched) log("info", `  探索: ${path}`);
   }
   const listing = await call("list_models");
@@ -769,13 +1016,38 @@ async function main() {
   }
   renderStatus();
 
-  // Don't paper over a missing runtime with a lesser warning.
-  if (!state.modelsDir && state.openvino?.state === "ready") {
-    showNotice(
-      "warn",
-      "モデルフォルダが見つかりません。設定から models フォルダを指定してください。"
-    );
-  }
+  await refreshSetup();
+  // First run, or a fresh install: open the panel instead of making the user
+  // find it. Anything already downloaded is reflected in the banner.
+  if (missingPieces().length > 0) el("setup-dialog").showModal();
+
+  await listen("mt://setup-progress", (event) => {
+    onSetupProgress(event.payload).catch((error) => log("error", String(error)));
+  });
+  await listen("mt://openvino-status", async (event) => {
+    state.openvino = event.payload;
+    refreshModelNotice();
+    renderStatus();
+    await refreshSetup();
+  });
+  await listen("mt://update-available", (event) => {
+    state.update = event.payload;
+    renderBanners();
+  });
+  await listen("mt://update-progress", (event) => {
+    const { phase, received, total, message } = event.payload;
+    if (phase === "error") {
+      state.updating = false;
+      renderBanners();
+      showNotice("error", message ?? "更新に失敗しました。");
+      return;
+    }
+    const percent = total > 0 ? ` (${((received / total) * 100).toFixed(0)}%)` : "";
+    el("update-banner-text").textContent =
+      phase === "install"
+        ? (message ?? "インストーラーを起動します…")
+        : `ダウンロード中 ${mb(received)}${total > 0 ? ` / ${mb(total)}` : ""}${percent}`;
+  });
 
   await listen("mt://status", (event) => onStatus(event.payload));
   await listen("mt://segment", (event) => {

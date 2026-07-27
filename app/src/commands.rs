@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use chrono::Local;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use meet_transcribe::capture::{list_devices, AudioDeviceInfo, DeviceSelection};
 use meet_transcribe::engine::{EngineCommand, EngineStatus, ModelSpec, RunConfig};
@@ -14,7 +14,9 @@ use meet_transcribe::engine::{EngineCommand, EngineStatus, ModelSpec, RunConfig}
 use crate::app::AppState;
 use crate::models::{self, ModelInfo};
 use crate::openvino::{self, OpenvinoStatus};
+use crate::setup::{self, SetupStatus};
 use crate::store::{SessionDetail, SessionSummary, Settings};
+use crate::update::{self, UpdateInfo};
 
 fn to_message(error: impl std::fmt::Display) -> String {
     format!("{error:#}")
@@ -264,4 +266,52 @@ pub fn save_session_as(
 #[tauri::command]
 pub fn sessions_dir(state: State<'_, AppState>) -> String {
     state.store.dir().display().to_string()
+}
+
+// --------------------------------------------------------------------- setup
+
+#[tauri::command]
+pub fn setup_status(state: State<'_, AppState>) -> SetupStatus {
+    let models_dir = state.settings.lock().unwrap().models_dir.clone();
+    setup::status(
+        &state.setup,
+        &state.openvino.lock().unwrap(),
+        models_dir.as_deref(),
+    )
+}
+
+/// Start downloading the OpenVINO GenAI runtime. Returns once the worker starts;
+/// progress arrives as `mt://setup-progress`.
+#[tauri::command]
+pub fn download_openvino(app: AppHandle) -> Result<(), String> {
+    setup::start_openvino(app)
+}
+
+#[tauri::command]
+pub fn download_model(app: AppHandle, repo: String) -> Result<(), String> {
+    setup::start_model(app, repo)
+}
+
+#[tauri::command]
+pub fn cancel_setup(state: State<'_, AppState>) {
+    state.setup.cancel();
+}
+
+// -------------------------------------------------------------------- updates
+
+#[tauri::command]
+pub fn app_version(app: AppHandle) -> String {
+    update::current_version(&app)
+}
+
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    update::check(&app).await
+}
+
+/// Download, verify and install. On success this never returns: the installer
+/// takes over and relaunches the app.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> Result<(), String> {
+    update::install(&app).await
 }

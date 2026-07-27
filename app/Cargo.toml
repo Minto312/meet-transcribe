@@ -1,6 +1,6 @@
 [package]
 name = "meet-transcribe-app"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Desktop UI for meet-transcribe: model / device / audio-source pickers and saved transcripts"
@@ -18,6 +18,29 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
+# In-app updates from the GitHub release feed. `native-tls` instead of the
+# default `rustls-tls` on purpose: rustls pulls in a crypto provider that needs
+# NASM/a C toolchain on Windows, while native-tls is a thin binding to
+# SChannel, which is already there. `zip` lets the updater accept both a bare
+# -setup.exe and a zipped one.
+tauri-plugin-updater = { version = "2", default-features = false, features = [
+  "native-tls",
+  "zip",
+] }
+# Fetching the OpenVINO runtime and the Whisper models on first run. Blocking,
+# because the download runs on its own thread like everything else here, and
+# `native-tls` so it shares SChannel with the updater rather than adding a
+# second TLS stack.
+reqwest = { version = "0.13", default-features = false, features = [
+  "blocking",
+  "json",
+  "native-tls",
+] }
+# Unpacking the OpenVINO GenAI archive. Every entry in it is deflate, so no
+# other codec is needed; `zlib-rs` is the pure-Rust backend (no C compiler).
+zip = { version = "4", default-features = false, features = [
+  "deflate-flate2-zlib-rs",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
