@@ -1,0 +1,17 @@
+* text=auto
+
+# PowerShell 5.1 is picky: here-strings (@'...'@) break with LF endings, so keep
+# scripts CRLF in the working tree even when edited from Linux/macOS.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+*.rs   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+
+Cargo.lock text eol=lf linguist-generated=true
+
+# Keep the language stats about the Rust implementation.
+reference-python/** linguist-vendored=true

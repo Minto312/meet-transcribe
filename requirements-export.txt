@@ -1,0 +1,7 @@
+# Model-export environment ONLY (keep separate from the inference venv).
+# transformers 4.53 BREAKS Whisper export -- pin to a known-good version.
+#   OpenVINO 2026.2  -> transformers 4.51.3
+#   OpenVINO 2025.x  -> transformers 4.52 also works
+optimum-intel[openvino]>=1.25.2
+transformers==4.51.3
+nncf>=2.14

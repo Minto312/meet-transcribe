@@ -1,0 +1,34 @@
+[package]
+name = "meet-transcribe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Real-time Japanese transcription of Windows desktop audio on an Intel NPU, via OpenVINO GenAI Whisper (NPU/iGPU/CPU switchable)"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Minto312/meet-transcribe"
+keywords = ["whisper", "npu", "openvino", "speech-to-text", "wasapi"]
+categories = ["multimedia::audio", "command-line-utilities"]
+# Not intended for crates.io: it links against a locally installed OpenVINO
+# runtime, so it cannot build in a sandbox without that dependency.
+publish = false
+
+[dependencies]
+# Rust bindings to OpenVINO GenAI (intel/openvino-rs). WhisperPipeline supports
+# device = "NPU" | "GPU" | "CPU". Requires OpenVINO runtime installed at build time.
+openvino-genai = "0.11"
+# Silero VAD via ONNX Runtime (ort), no PyTorch.
+voice_activity_detector = "0.2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hound = "3"          # WAV loading (bench)
+
+# WASAPI loopback capture is Windows-only.
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.23"
+
+# src/lib.rs, src/bin/bench.rs, src/bin/live.rs are auto-discovered as the lib
+# (crate name "meet_transcribe") and the `bench` / `live` binaries.
+#
+# NOTE: wasapi / voice_activity_detector / openvino-genai move fast. If a version
+# fails to resolve on first build, run `cargo add <crate>` to pin the current one.

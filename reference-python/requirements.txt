@@ -1,0 +1,9 @@
+# Inference + benchmark runtime (lean). openvino-genai pulls in openvino and
+# openvino-tokenizers. Version floors that matter for the Intel NPU:
+#   >= 2025.1  stateful Whisper works on NPU out of the box (no --disable-stateful)
+#   >= 2025.2  whisper-large-v3-turbo (INT4) runs on NPU
+# Prefer the latest release; the floors below are the hard requirements.
+openvino-genai>=2025.2
+numpy>=1.24
+soundfile>=0.12
+soxr>=0.5

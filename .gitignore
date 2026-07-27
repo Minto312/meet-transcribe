@@ -1,0 +1,22 @@
+# Rust
+/target/
+
+# Model weights: fetch with scripts/get_model.ps1 (hundreds of MB)
+models/
+
+# Generated / recorded audio: make one with scripts/make_sample_wav.ps1
+*.wav
+*.flac
+*.m4a
+
+# Python (reference prototype only)
+__pycache__/
+*.pyc
+.venv/
+env-*/
+
+# Local editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

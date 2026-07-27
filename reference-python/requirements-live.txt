@@ -1,0 +1,5 @@
+# Extras for live desktop-audio capture (on top of requirements.txt).
+-r requirements.txt
+PyAudioWPatch>=0.2.12.7   # WASAPI loopback (Windows); PyAudio fork, no virtual cable needed
+silero-vad>=5.1           # streaming VAD
+torch>=2.0                # required by silero-vad's VADIterator (CPU wheel is fine)
