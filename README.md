@@ -37,15 +37,18 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
 
 | binary | purpose |
 |---|---|
+| **`meet-transcribe-app`** | **The GUI** — model / device / audio-source pickers, start & stop, and every transcript kept in a sidebar |
 | `live` | Transcribe desktop audio continuously, printing each utterance with its RTF |
 | `bench` | Measure load/compile time and RTF per device (`--devices NPU GPU CPU`) |
 | `diag` | Bisect an OpenVINO exception (audio length / language config / device) |
 | `capture_probe` | Verify WASAPI loopback capture on its own, independent of ASR |
+| `engine_probe` | Drive the GUI's engine from a console — start, capture, stop, drain — with no window |
 
 ```
-[WASAPI loopback]  default render device opened with Direction::Capture
-   (src/capture.rs)  = the system mix. No Stereo Mix, no virtual audio cable.
-        │            WASAPI autoconvert delivers 16 kHz float; channels downmixed
+[WASAPI]  a render endpoint opened with Direction::Capture = the system mix
+ (src/capture.rs)  (no Stereo Mix, no virtual audio cable), or a microphone
+        │          endpoint. WASAPI autoconvert delivers 16 kHz float;
+        │          channels are downmixed to mono.
         ▼
 [VAD]   Silero VAD via ONNX Runtime, no PyTorch          (src/vad.rs)
         │  utterance ends after ~0.5 s of silence; <0.7 s fragments dropped
@@ -54,6 +57,9 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
         ▼
 [out]   "( 2.8s RTF=0.10) 本日の定例ミーティングを始めます"
 ```
+
+`src/engine.rs` wraps that pipeline in the threading a window needs (see
+[The GUI](#the-gui)); `live` still drives the pieces directly in one loop.
 
 ## Requirements
 
@@ -64,6 +70,8 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
   **GenAI** archive, not the plain runtime archive; see
   [notes/environment.md](notes/environment.md#which-openvino-archive-to-download)
 - **Rust** (stable, MSVC toolchain) + **VS Build Tools** (VCTools workload)
+- For the GUI: **WebView2**, which ships with Windows 11. Nothing else — the
+  front end is static files with no build step, so **no Node toolchain**.
 - No Python required.
 
 ## Quick start
@@ -75,16 +83,21 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
 # 2. Get a model — official OpenVINO conversions only (see the warning below)
 .\scripts\get_model.ps1 -Repo OpenVINO/whisper-medium-int8-ov
 
-# 3. Build
-cargo build --release
+# 3a. The GUI: builds it if needed, then launches it with OpenVINO on PATH
+.\scripts\run_gui.ps1 -Build
 
-# 4. Transcribe whatever your speakers are playing
+# 3b. …or the CLI
+cargo build --release
 cargo run --release --bin live -- --model models\whisper-medium-int8-ov --device NPU
 ```
 
 `live` prints `[1/3] … [3/3]` as it compiles the model, initializes the VAD, and
 opens the loopback device. **The first step is slow on the NPU** (see below) — it is
-compiling, not hung.
+compiling, not hung. The GUI shows the same thing as a *モデル読み込み中* state and
+stays responsive throughout.
+
+`live --list-devices` prints the selectable audio endpoints and their ids;
+`--mic` and `--audio-device <id>` pick one, matching what the GUI offers.
 
 To reproduce the benchmark:
 
@@ -94,6 +107,75 @@ To reproduce the benchmark:
 .\scripts\load_test.ps1  -Device NPU          # under iGPU saturation
 .\scripts\load_test.ps1  -Device GPU          # ... and compare
 ```
+
+## The GUI
+
+A [Tauri](https://tauri.app/) window over the same pipeline: pick a model, pick
+`NPU`/`GPU`/`CPU`, pick which audio endpoint to listen to, press start. Every run
+is saved automatically and stays in a sidebar.
+
+**It must be launched through `scripts/run_gui.ps1`.** The binary links against
+`openvino_genai_c.dll`, so the OpenVINO DLLs have to resolve when the process
+loads — too early for the app to repair its own `PATH`. The script sources
+`setupvars.bat` and then launches the window detached.
+
+### How it is put together
+
+The CLI can afford one blocking loop; a window cannot, because
+`WhisperPipeline::new` takes minutes on the NPU. `src/engine.rs` therefore splits
+the pipeline across threads:
+
+```
+control thread ──select──┬── EngineCommand   (from the UI)
+                         └── Notice          (from the workers)
+      │ spawns
+      ├── capture thread   WASAPI -> Silero VAD -> utterances
+      │      per run; nothing in `wasapi` is Send, so the device is opened
+      │      on the thread that reads it
+      └── ASR thread       long-lived; owns the compiled pipeline and KEEPS IT
+                           across stop/start
+```
+
+Three consequences worth knowing:
+
+- **A stop/start of the same model+device is instant.** The compiled pipeline is
+  cached in the ASR thread, so the ~170 s is paid once per app run, not per
+  recording. *モデルを先読み* pays it before the meeting starts.
+- **Utterances captured during the compile are not lost.** `Load` and `Work`
+  share one FIFO channel, so queued audio is simply transcribed once the model
+  lands. The channel is *bounded* at 128 utterances: if the device cannot keep
+  up, the UI says how many were dropped instead of growing until the process
+  dies.
+- **Stopping drains rather than truncates.** The run stays in *残りを処理中*
+  until every captured utterance has been through the ASR, then closes.
+
+### Where transcripts go
+
+`%APPDATA%\com.minto312.meet-transcribe\sessions\<timestamp>.jsonl`, one
+append-only file per run: a `meta` line, then one line per utterance, then an
+`end` line. Each utterance is on disk before it appears in the window, so a
+crash costs nothing; a file with no `end` line is just an interrupted session and
+reads back fine. *書き出し* renders one as Markdown, *コピー* puts the same on the
+clipboard. Runs that captured nothing are discarded rather than left in the
+sidebar.
+
+Settings live next to it in `settings.json`.
+
+### What the model picker already knows
+
+Two of this project's most expensive lessons are invisible until `generate()`
+throws minutes into a run, so the picker checks for them up front: a directory
+containing `openvino_decoder_with_past_model.*` is greyed out as the old
+stateless export, and a `large*` model warns that the NPU will reject it. Both
+are explained in the next section.
+
+### Deliberate choices
+
+- **No Content-Security-Policy** (`"csp": null`). Every asset is compiled into
+  the exe and the app loads nothing remote, so a CSP would only add a class of
+  first-run failures that are hard to diagnose without a desktop session.
+- **Loopback *or* microphone, not both at once.** Mixing two WASAPI streams
+  needs clock-drift handling between endpoints; picking one is honest and works.
 
 ## Things that will bite you
 
@@ -130,36 +212,54 @@ removes almost all of it.
 
 Built, run, and measured on real hardware (2026-07-27) — see
 [notes/benchmark-results.md](notes/benchmark-results.md). Working: NPU/iGPU/CPU
-inference with counter-verified device attribution, WASAPI loopback capture, and the
-full `live` pipeline.
+inference with counter-verified device attribution, WASAPI loopback and
+microphone capture, and the full `live` pipeline.
 
 Rough edges, honestly stated:
 
-- Startup latency on the NPU (above) — the biggest usability problem.
+- Startup latency on the NPU (above) — the biggest usability problem. The GUI
+  hides it behind a preload button and a resident pipeline, but it is still
+  minutes the first time.
 - Utterance-level latency only. Text appears when an utterance ends; there are no
   streaming partials yet (LocalAgreement-2 is the intended fix).
 - The benchmark clip is clean single-speaker TTS. Real meetings — overlapping
   speakers, noise, disfluencies — are harder, so treat the transcription quality here
   as optimistic. The RTF comparison between devices is unaffected.
 - Occasional hallucination on trailing silence.
-- Captures the whole system mix, so it picks up other applications' sound. Isolating
-  one process needs `wasapi`'s `new_application_loopback_client`.
-- Your own microphone is not captured — only what the speakers play.
+- Loopback captures the whole system mix, so it picks up other applications'
+  sound. Isolating one process needs `wasapi`'s `new_application_loopback_client`.
+- Loopback and microphone are alternatives, not a mix: you cannot record both
+  sides of a call into one transcript yet.
+- No speaker diarization — the transcript is a flat list of utterances.
+- The GUI's *engine* is verified end-to-end on the reference machine
+  (`scripts/test_engine.ps1`: NPU compile 97 s, five utterances at RTF
+  0.17–0.38, clean drain back to idle), and the front end was exercised against
+  a mocked backend in a browser. The assembled window has been launched and
+  confirmed to run, but has not been clicked through by hand — the reference
+  machine is driven over SSH, which has no interactive desktop.
 
 ## Layout
 
 ```
 src/asr.rs                 OpenVINO WhisperPipeline wrapper (device switch + timing)
-src/capture.rs             WASAPI loopback capture (Windows)
+src/capture.rs             WASAPI capture: loopback or microphone, + enumeration
 src/vad.rs                 Silero VAD streaming segmentation
+src/engine.rs              threaded orchestration behind the GUI (model cache,
+                           bounded queue, run state machine)
 src/audio.rs               downmix / resample helpers
-src/bin/{live,bench,diag,capture_probe}.rs
+src/bin/{live,bench,diag,capture_probe,engine_probe}.rs
+app/                       the Tauri GUI (its own package in the workspace)
+  app/src/                 state, engine->webview bridge, commands, session store
+  app/ui/                  static front end — no bundler, no Node
 scripts/                   setup + measurement (PowerShell) — see scripts/README.md
 notes/                     benchmark results and environment facts
 export_model.py            optional: convert a model yourself with optimum-intel
 reference-python/          the Python prototype this was ported from, kept for
                            cross-checking against OpenVINO's Python API
 ```
+
+`cargo build --release` at the root builds only the core package and its CLI
+binaries; the GUI is `cargo build --release -p meet-transcribe-app`.
 
 ## License
 

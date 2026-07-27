@@ -6,11 +6,13 @@ and the OpenVINO installation is located automatically (explicit override:
 
 | script | purpose |
 |---|---|
+| `run_gui.ps1` | **Launch the GUI** with OpenVINO on `PATH` (it cannot be double-clicked; see below). `-Build` compiles it first |
 | `get_model.ps1` | Download an OpenVINO IR Whisper model straight from Hugging Face — **no Python / `huggingface-cli` needed**. `-Repo OpenVINO/whisper-medium-int8-ov` |
 | `make_sample_wav.ps1` | Generate a 16 kHz mono Japanese test clip with the built-in Windows TTS voice |
 | `prove_npu.ps1` | Run the benchmark **while sampling NPU/iGPU utilization**, so the result can be attributed to a device. `-Device NPU -Model models\whisper-medium-int8-ov` |
 | `load_test.ps1` | Measure a device **while the iGPU is deliberately saturated** — the realistic condition on a laptop. `-Device NPU` / `-Device GPU` |
 | `test_capture.ps1` | Play audio and confirm WASAPI loopback really captures the system mix |
+| `test_engine.ps1` | Exercise the **GUI's engine** headlessly: compile a model, capture the played clip, stop, and confirm it drains back to idle. `-Device NPU` |
 | `_common.ps1` | Shared helpers: locate `setupvars.bat`, auto-detect the NPU adapter |
 
 ## Typical order
@@ -22,6 +24,14 @@ cargo build --release
 .\scripts\prove_npu.ps1 -Device NPU
 .\scripts\load_test.ps1  -Device NPU     # then -Device GPU, and compare
 ```
+
+## Why the GUI needs a launcher
+
+`meet-transcribe-app.exe` links against `openvino_genai_c.dll`, so the OpenVINO
+DLLs must resolve when Windows loads the process — before any of the app's own
+code runs, which means the app cannot fix its own `PATH`. Double-clicking the exe
+fails with a loader error. `run_gui.ps1` sources `setupvars.bat` first and then
+launches the window detached, so the shell is not held open.
 
 ## Why "prove" the NPU
 

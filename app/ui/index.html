@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>meet-transcribe</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <button id="new-session" class="new-session">
+            <span class="plus">＋</span> 新しい文字起こし
+          </button>
+        </div>
+        <nav id="session-list" class="session-list" aria-label="保存された文字起こし"></nav>
+        <div class="sidebar-foot">
+          <button id="open-folder" class="ghost">保存先を開く</button>
+          <button id="open-settings" class="ghost">設定</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="head">
+          <div class="head-title">
+            <h1 id="title">新しい文字起こし</h1>
+            <p id="submeta" class="submeta">開始するとここに保存されます</p>
+          </div>
+          <div class="head-actions">
+            <button id="rename" class="ghost" disabled>名前を変更</button>
+            <button id="copy" class="ghost" disabled>コピー</button>
+            <button id="export" class="ghost" disabled>書き出し</button>
+            <button id="delete" class="ghost danger" disabled>削除</button>
+          </div>
+        </header>
+
+        <section id="transcript" class="transcript" aria-live="polite">
+          <div class="empty" id="empty-state">
+            <p class="empty-title">まだ文字起こしはありません</p>
+            <p class="empty-body">
+              下でモデル・デバイス・音声入力を選び、<strong>開始</strong>を押してください。
+            </p>
+          </div>
+        </section>
+
+        <footer class="control">
+          <div id="notice" class="notice hidden"></div>
+
+          <div class="control-row">
+            <label class="field">
+              <span>モデル</span>
+              <select id="model"></select>
+            </label>
+            <label class="field">
+              <span>実行デバイス</span>
+              <select id="device">
+                <option value="NPU">NPU (Intel AI Boost)</option>
+                <option value="GPU">GPU (Intel Arc iGPU)</option>
+                <option value="CPU">CPU</option>
+              </select>
+            </label>
+            <label class="field grow">
+              <span>音声入力</span>
+              <select id="audio"></select>
+            </label>
+            <button id="refresh-audio" class="ghost icon" title="オーディオデバイスを再取得">⟳</button>
+          </div>
+
+          <div class="control-row">
+            <span id="phase" class="pill idle">停止中</span>
+            <div class="meter" title="入力レベル">
+              <div id="meter-fill" class="meter-fill"></div>
+            </div>
+            <span id="status-text" class="muted"></span>
+            <button id="log-toggle" class="ghost small">ログ</button>
+            <button id="preload" class="ghost">モデルを先読み</button>
+            <button id="toggle" class="primary">開始</button>
+          </div>
+
+          <div id="log-panel" class="log-panel hidden"></div>
+        </footer>
+      </main>
+    </div>
+
+    <dialog id="settings-dialog" class="dialog">
+      <form method="dialog">
+        <h2>設定</h2>
+
+        <label class="row">
+          <span>モデルフォルダ</span>
+          <span class="row-inline">
+            <input id="set-models-dir" type="text" readonly autocomplete="off" />
+            <button id="pick-models-dir" type="button" class="ghost">選択</button>
+          </span>
+        </label>
+
+        <label class="row">
+          <span>言語コード</span>
+          <input id="set-language" type="text" spellcheck="false" autocomplete="off" />
+        </label>
+
+        <label class="row">
+          <span>1 発話の最大長 (秒)</span>
+          <input id="set-max-segment" type="number" min="3" max="30" step="0.5" />
+        </label>
+
+        <label class="row">
+          <span>VAD しきい値 (0-1)</span>
+          <input id="set-threshold" type="number" min="0.1" max="0.95" step="0.05" />
+        </label>
+
+        <label class="row">
+          <span>発話終端とみなす無音 (ms)</span>
+          <input id="set-silence" type="number" min="100" max="3000" step="50" />
+        </label>
+
+        <label class="row check">
+          <input id="set-autoscroll" type="checkbox" />
+          <span>新しい発話に自動でスクロールする</span>
+        </label>
+
+        <label class="row check">
+          <input id="set-metrics" type="checkbox" />
+          <span>各発話に長さと RTF を表示する</span>
+        </label>
+
+        <p class="hint">
+          モデルの読み込みは NPU では medium で 3 分ほどかかり、プロセスをまたいでキャッシュされません。
+          読み込み済みのモデルは停止しても保持されるので、同じ設定での再開は即座です。
+        </p>
+
+        <menu>
+          <button value="cancel" class="ghost">閉じる</button>
+          <button id="settings-save" value="save" class="primary">保存</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="rename-dialog" class="dialog">
+      <form method="dialog">
+        <h2>名前を変更</h2>
+        <label class="row">
+          <span>タイトル</span>
+          <input id="rename-input" type="text" />
+        </label>
+        <menu>
+          <button value="cancel" class="ghost">キャンセル</button>
+          <button value="save" class="primary">変更</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>

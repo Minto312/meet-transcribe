@@ -1,3 +1,9 @@
+[workspace]
+# The GUI lives in its own package so the core crate stays a plain library plus
+# CLI binaries. `cargo build` at the root still builds only the core package;
+# the GUI is `cargo build -p meet-transcribe-app`.
+members = ["app"]
+
 [package]
 name = "meet-transcribe"
 version = "0.1.0"
@@ -22,6 +28,11 @@ voice_activity_detector = "0.2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 hound = "3"          # WAV loading (bench)
+# Engine <-> UI plumbing: `select!` over command/notice channels, and a bounded
+# job queue so a slow ASR device applies backpressure instead of eating all RAM.
+crossbeam-channel = "0.5"
+# Device / segment / config types cross the Tauri IPC boundary as JSON.
+serde = { version = "1", features = ["derive"] }
 
 # WASAPI loopback capture is Windows-only.
 [target.'cfg(windows)'.dependencies]

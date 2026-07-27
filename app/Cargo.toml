@@ -1,0 +1,25 @@
+[package]
+name = "meet-transcribe-app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Desktop UI for meet-transcribe: model / device / audio-source pickers and saved transcripts"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+meet-transcribe = { path = ".." }
+# The frontend is plain HTML/CSS/JS with no build step, so no Node toolchain is
+# needed anywhere: `cargo build` produces a working exe on its own.
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+crossbeam-channel = "0.5"
