@@ -96,6 +96,15 @@
         </label>
 
         <label class="row">
+          <span>OpenVINO インストール先 <em id="set-openvino-state"></em></span>
+          <span class="row-inline">
+            <input id="set-openvino-dir" type="text" readonly autocomplete="off"
+                   placeholder="自動検出" />
+            <button id="pick-openvino-dir" type="button" class="ghost">選択</button>
+          </span>
+        </label>
+
+        <label class="row">
           <span>言語コード</span>
           <input id="set-language" type="text" spellcheck="false" autocomplete="off" />
         </label>
@@ -124,6 +133,12 @@
           <input id="set-metrics" type="checkbox" />
           <span>各発話に長さと RTF を表示する</span>
         </label>
+
+        <p class="hint">
+          OpenVINO は通常フォルダ指定なしで自動検出されます。見つからないときだけ、
+          GenAI アーカイブ (openvino_genai_windows_&lt;version&gt;_x86_64) を展開したフォルダを
+          指定してください。変更は次回起動時から反映されます。
+        </p>
 
         <p class="hint">
           モデルの読み込みは NPU では medium で 3 分ほどかかり、プロセスをまたいでキャッシュされません。

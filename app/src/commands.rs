@@ -13,6 +13,7 @@ use meet_transcribe::engine::{EngineCommand, EngineStatus, ModelSpec, RunConfig}
 
 use crate::app::AppState;
 use crate::models::{self, ModelInfo};
+use crate::openvino::{self, OpenvinoStatus};
 use crate::store::{SessionDetail, SessionSummary, Settings};
 
 fn to_message(error: impl std::fmt::Display) -> String {
@@ -79,6 +80,25 @@ pub fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<()
     state.persist_settings().map_err(to_message)
 }
 
+// ------------------------------------------------------------------ openvino
+
+#[tauri::command]
+pub fn openvino_status(state: State<'_, AppState>) -> OpenvinoStatus {
+    state.openvino.lock().unwrap().clone()
+}
+
+/// Record where OpenVINO lives. Takes effect on the next launch: the runtime is
+/// resolved once, before any thread exists, and re-pointing `PATH` underneath a
+/// process that may already have loaded a different copy is not something to do
+/// while the app is running.
+#[tauri::command]
+pub fn set_openvino_dir(state: State<'_, AppState>, dir: String) -> Result<(), String> {
+    let path = PathBuf::from(&dir);
+    openvino::check_root(&path)?;
+    state.settings.lock().unwrap().openvino_dir = Some(path);
+    state.persist_settings().map_err(to_message)
+}
+
 // --------------------------------------------------------------------- audio
 
 #[tauri::command]
@@ -130,8 +150,19 @@ pub fn get_status(state: State<'_, AppState>) -> EngineStatus {
     state.status.lock().unwrap().clone()
 }
 
+/// Refuse to touch the ASR path when the runtime never resolved. A delay-loaded
+/// import that cannot be satisfied raises a structured exception and kills the
+/// process without a word, so this guard is what turns that into a message.
+fn require_openvino(state: &State<'_, AppState>) -> Result<(), String> {
+    match &*state.openvino.lock().unwrap() {
+        OpenvinoStatus::Ready { .. } => Ok(()),
+        OpenvinoStatus::Missing { message, .. } => Err(message.clone()),
+    }
+}
+
 #[tauri::command]
 pub fn preload_model(state: State<'_, AppState>, req: ModelRequest) -> Result<(), String> {
+    require_openvino(&state)?;
     state.engine.send(EngineCommand::Preload(req.into_spec()?));
     Ok(())
 }
@@ -141,6 +172,7 @@ pub fn start_transcription(
     state: State<'_, AppState>,
     req: StartRequest,
 ) -> Result<String, String> {
+    require_openvino(&state)?;
     if state.store.active_id().is_some() {
         return Err("すでに記録中です".to_string());
     }

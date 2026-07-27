@@ -83,8 +83,9 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
 # 2. Get a model — official OpenVINO conversions only (see the warning below)
 .\scripts\get_model.ps1 -Repo OpenVINO/whisper-medium-int8-ov
 
-# 3a. The GUI: builds it if needed, then launches it with OpenVINO on PATH
-.\scripts\run_gui.ps1 -Build
+# 3a. The GUI
+cargo build --release -p meet-transcribe-app
+.\target\release\meet-transcribe-app.exe
 
 # 3b. …or the CLI
 cargo build --release
@@ -114,10 +115,30 @@ A [Tauri](https://tauri.app/) window over the same pipeline: pick a model, pick
 `NPU`/`GPU`/`CPU`, pick which audio endpoint to listen to, press start. Every run
 is saved automatically and stays in a sidebar.
 
-**It must be launched through `scripts/run_gui.ps1`.** The binary links against
-`openvino_genai_c.dll`, so the OpenVINO DLLs have to resolve when the process
-loads — too early for the app to repair its own `PATH`. The script sources
-`setupvars.bat` and then launches the window detached.
+Just run the exe. It finds the OpenVINO install itself — `INTEL_OPENVINO_DIR`,
+then the usual places an archive gets extracted to (`C:\ov-genai`, `C:\openvino`,
+`C:\Program Files\Intel`, next to the exe, …) — and prepends the same
+directories to `PATH` that `setupvars.bat` would.
+
+That is only possible because `openvino_genai_c.dll` is linked with
+`/DELAYLOAD`. With an ordinary load-time import the Windows loader resolves it
+*before* `main()` runs, so a machine without OpenVINO on `PATH` gets
+`0xC00004BC` and a bare "DLL が見つかりません" dialog, with no opportunity for
+the app to say anything. Delaying the import buys the app a chance to fix its
+own environment first — and if it genuinely cannot find the runtime, to open
+the window and explain instead of vanishing.
+
+`scripts/run_gui.ps1` is still there for an install somewhere unusual; so is
+the OpenVINO folder field in the settings dialog.
+
+The half of this that a screenshot cannot check is whether the *delayed* import
+resolves when it is finally called — press 開始 and either it works or the delay
+stub raises a structured exception and the process disappears. So the binary can
+press that button for itself:
+
+```powershell
+.\meet-transcribe-app.exe --selftest <model-dir> CPU   # exit 0 = the import resolves
+```
 
 ### How it is put together
 
@@ -171,6 +192,8 @@ are explained in the next section.
 
 ### Deliberate choices
 
+- **`/DELAYLOAD` on the one OpenVINO import**, rather than requiring a launcher
+  script or bundling ~212 MB of Intel runtime next to the exe.
 - **No Content-Security-Policy** (`"csp": null`). Every asset is compiled into
   the exe and the app loads nothing remote, so a CSP would only add a class of
   first-run failures that are hard to diagnose without a desktop session.
@@ -231,6 +254,9 @@ Rough edges, honestly stated:
 - Loopback and microphone are alternatives, not a mix: you cannot record both
   sides of a call into one transcript yet.
 - No speaker diarization — the transcript is a flat list of utterances.
+- The GUI now starts without OpenVINO on `PATH` and constructs a real pipeline
+  through the delay-loaded import (`--selftest`, verified on the reference
+  machine with `INTEL_OPENVINO_DIR` unset).
 - The GUI's *engine* is verified end-to-end on the reference machine
   (`scripts/test_engine.ps1`: NPU compile 97 s, five utterances at RTF
   0.17–0.38, clean drain back to idle), and the front end was exercised against
@@ -250,6 +276,7 @@ src/audio.rs               downmix / resample helpers
 src/bin/{live,bench,diag,capture_probe,engine_probe}.rs
 app/                       the Tauri GUI (its own package in the workspace)
   app/src/                 state, engine->webview bridge, commands, session store
+  app/src/openvino.rs      locating the runtime at startup (see the GUI section)
   app/ui/                  static front end — no bundler, no Node
 scripts/                   setup + measurement (PowerShell) — see scripts/README.md
 notes/                     benchmark results and environment facts
