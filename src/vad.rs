@@ -6,12 +6,36 @@
 //! each utterance" latency -- fine for a benchmark and for reading a transcript.
 //! (A lower-latency LocalAgreement-2 partial-hypothesis refinement is a
 //! documented next step; see README.)
+//!
+//! Each utterance carries the sample offset it started at, so the GUI can put a
+//! timestamp on every line without the caller having to track the stream clock.
 
 use anyhow::Result;
 use voice_activity_detector::VoiceActivityDetector;
 
 /// Silero at 16 kHz requires exactly 512-sample windows.
 const WINDOW: usize = 512;
+const SAMPLE_RATE: f64 = 16_000.0;
+
+/// One completed utterance plus where it sat in the stream.
+pub struct Utterance {
+    pub samples: Vec<f32>,
+    /// Index of this utterance's first sample, counted from the first sample
+    /// ever fed to this segmenter.
+    pub start_sample: u64,
+}
+
+impl Utterance {
+    /// Duration of the utterance in seconds.
+    pub fn seconds(&self) -> f64 {
+        self.samples.len() as f64 / SAMPLE_RATE
+    }
+
+    /// Offset from the start of the capture, in seconds.
+    pub fn start_seconds(&self) -> f64 {
+        self.start_sample as f64 / SAMPLE_RATE
+    }
+}
 
 pub struct SpeechSegmenter {
     vad: VoiceActivityDetector,
@@ -19,6 +43,8 @@ pub struct SpeechSegmenter {
     speech: Vec<f32>,   // samples of the active utterance
     in_speech: bool,
     silence_run: usize, // consecutive non-speech windows while in an utterance
+    consumed: u64,      // windows already analysed, in samples
+    speech_start: u64,  // sample index where the active utterance began
     threshold: f32,
     min_silence_windows: usize,
     max_samples: usize,
@@ -38,6 +64,8 @@ impl SpeechSegmenter {
             speech: Vec::new(),
             in_speech: false,
             silence_run: 0,
+            consumed: 0,
+            speech_start: 0,
             threshold,
             min_silence_windows: (min_silence_ms / window_ms).max(1) as usize,
             max_samples: (max_segment_s * 16_000.0) as usize,
@@ -48,14 +76,24 @@ impl SpeechSegmenter {
         })
     }
 
+    /// True while an utterance is being accumulated. The GUI uses this to show
+    /// a "speaking" indicator between the first speech window and the finalize.
+    pub fn in_speech(&self) -> bool {
+        self.in_speech
+    }
+
     /// Feed arbitrary-length 16 kHz mono audio; return any utterances that
     /// completed (ended on silence, or hit the max segment length).
-    pub fn feed(&mut self, audio_16k: &[f32]) -> Vec<Vec<f32>> {
+    pub fn feed(&mut self, audio_16k: &[f32]) -> Vec<Utterance> {
         let mut finished = Vec::new();
         self.buf.extend_from_slice(audio_16k);
 
         while self.buf.len() >= WINDOW {
+            // Position of this window's first sample, before it is consumed.
+            let window_start = self.consumed;
             let win: Vec<f32> = self.buf.drain(..WINDOW).collect();
+            self.consumed += WINDOW as u64;
+
             let prob = self.vad.predict(win.clone());
             let is_speech = prob >= self.threshold;
 
@@ -63,6 +101,7 @@ impl SpeechSegmenter {
                 if !self.in_speech {
                     self.in_speech = true;
                     self.speech.clear();
+                    self.speech_start = window_start;
                 }
                 self.speech.extend_from_slice(&win);
                 self.silence_run = 0;
@@ -74,7 +113,10 @@ impl SpeechSegmenter {
                     self.in_speech = false;
                     self.silence_run = 0;
                     if self.speech.len() >= self.min_samples {
-                        finished.push(std::mem::take(&mut self.speech));
+                        finished.push(Utterance {
+                            samples: std::mem::take(&mut self.speech),
+                            start_sample: self.speech_start,
+                        });
                     } else {
                         self.speech.clear(); // too short: almost certainly not speech
                     }
@@ -83,7 +125,10 @@ impl SpeechSegmenter {
 
             // Whisper caps at 30s; force-flush over-long utterances.
             if self.in_speech && self.speech.len() >= self.max_samples {
-                finished.push(std::mem::take(&mut self.speech));
+                finished.push(Utterance {
+                    samples: std::mem::take(&mut self.speech),
+                    start_sample: self.speech_start,
+                });
                 self.in_speech = false;
                 self.silence_run = 0;
             }

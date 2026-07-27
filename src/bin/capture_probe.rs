@@ -8,11 +8,11 @@
 
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {
-    use meet_transcribe::capture::LoopbackCapture;
+    use meet_transcribe::capture::AudioCapture;
     use std::time::{Duration, Instant};
 
     println!("opening WASAPI loopback ...");
-    let mut cap = LoopbackCapture::open()?;
+    let mut cap = AudioCapture::open_default_loopback()?;
     println!(
         "opened: {} ({} Hz, {} ch)",
         cap.device_name,
