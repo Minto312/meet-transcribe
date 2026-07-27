@@ -65,11 +65,15 @@ const CANCELLED: &str = "cancelled";
 /// the old stateless export and throw from `generate()` on every device (see
 /// `notes/benchmark-results.md`). Sizes are the sum of each repo's blobs, as
 /// reported by the Hugging Face API.
+///
+/// The notes are kept short deliberately: they share one line with the name, the
+/// size and a button, and a note that overflows loses its ellipsis exactly where
+/// the useful part is.
 const CATALOG: &[Catalog] = &[
     Catalog {
         repo: "OpenVINO/whisper-tiny-int8-ov",
         size_mb: 49,
-        note: "最速。精度は最も低い",
+        note: "最速・最も粗い",
         npu: true,
         recommended: false,
     },
@@ -83,21 +87,21 @@ const CATALOG: &[Catalog] = &[
     Catalog {
         repo: "OpenVINO/whisper-small-int8-ov",
         size_mb: 257,
-        note: "NPU でのコンパイルは約 60 秒",
+        note: "NPU コンパイル約 60 秒",
         npu: true,
         recommended: false,
     },
     Catalog {
         repo: "OpenVINO/whisper-medium-int8-ov",
         size_mb: 784,
-        note: "NPU で動く最大のモデル。コンパイルは約 170 秒",
+        note: "NPU で動く最大。約 170 秒",
         npu: true,
         recommended: true,
     },
     Catalog {
         repo: "OpenVINO/whisper-large-v3-turbo-int4-ov",
         size_mb: 478,
-        note: "NPU では generate() が例外になる。GPU / CPU 専用",
+        note: "NPU 不可・GPU / CPU 専用",
         npu: false,
         recommended: false,
     },

@@ -734,8 +734,10 @@ select option:disabled {
   overflow-y: auto;
 }
 
+/* The setup dialog: five model rows, each one name + size + note + button on a
+   single line, so it needs the room. */
 .dialog.wide {
-  width: min(660px, 94vw);
+  width: min(720px, 94vw);
 }
 
 .dialog::backdrop {
