@@ -203,6 +203,16 @@
           <span>各発話に長さと RTF を表示する</span>
         </label>
 
+        <label class="row check">
+          <input id="set-preload-launch" type="checkbox" />
+          <span>起動したら選択中のモデルを先読みする</span>
+        </label>
+
+        <label class="row check">
+          <input id="set-autostart" type="checkbox" />
+          <span>Windows にサインインしたら最小化して起動する</span>
+        </label>
+
         <div class="row split">
           <span>バージョン <em id="set-version"></em></span>
           <span class="row-inline">
@@ -222,6 +232,7 @@
         <p class="hint">
           モデルの読み込みは NPU では medium で 3 分ほどかかり、プロセスをまたいでキャッシュされません。
           読み込み済みのモデルは停止しても保持されるので、同じ設定での再開は即座です。
+          サインイン時の起動と起動時の先読みを両方オンにしておくと、会議の頃には読み込みが終わっています。
         </p>
 
         <menu>

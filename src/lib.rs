@@ -10,6 +10,7 @@
 
 pub mod asr;
 pub mod audio;
+pub mod repeat;
 pub mod vad;
 
 #[cfg(windows)]

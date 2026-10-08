@@ -32,6 +32,8 @@ const state = {
   /** True from the moment 更新して再起動 is pressed until the process exits. */
   updating: false,
   version: "",
+  /** Whether Windows starts the app at sign-in, as last read from the registry. */
+  autostart: false,
 };
 
 /** Placeholder title shown until the first utterance names the session. */
@@ -199,7 +201,11 @@ function segmentNode(segment) {
   if (state.settings?.showMetrics) {
     const metrics = document.createElement("span");
     metrics.className = "metrics";
-    metrics.textContent = `${segment.audioS.toFixed(1)}s · RTF ${segment.rtf.toFixed(2)}`;
+    const parts = [`${segment.audioS.toFixed(1)}s`, `RTF ${segment.rtf.toFixed(2)}`];
+    // Only worth a word when the utterance actually queued; absent from
+    // transcripts recorded before it was tracked.
+    if (segment.waitS >= 0.5) parts.push(`待ち ${segment.waitS.toFixed(1)}s`);
+    metrics.textContent = parts.join(" · ");
     body.append(metrics);
   }
 
@@ -800,6 +806,11 @@ async function loadSettingsIntoDialog() {
   el("set-silence").value = s.minSilenceMs;
   el("set-autoscroll").checked = s.autoScroll;
   el("set-metrics").checked = s.showMetrics;
+  el("set-preload-launch").checked = s.preloadOnLaunch;
+  // The registry is the record, not settings.json: Task Manager can switch
+  // the entry off behind the app's back.
+  state.autostart = await invoke("autostart_enabled").catch(() => false);
+  el("set-autostart").checked = state.autostart;
   el("set-version").textContent = state.version;
   el("update-state").textContent = state.update
     ? `バージョン ${state.update.version} が利用できます。`
@@ -889,7 +900,19 @@ function wireEvents() {
     state.settings.minSilenceMs = Number(el("set-silence").value);
     state.settings.autoScroll = el("set-autoscroll").checked;
     state.settings.showMetrics = el("set-metrics").checked;
+    state.settings.preloadOnLaunch = el("set-preload-launch").checked;
     await call("set_settings", { settings: state.settings });
+    const autostart = el("set-autostart").checked;
+    if (autostart !== state.autostart) {
+      await call("set_autostart", { enabled: autostart });
+      state.autostart = autostart;
+      log(
+        "info",
+        autostart
+          ? "サインイン時に起動するよう登録しました。"
+          : "サインイン時の起動を解除しました。"
+      );
+    }
     if (state.viewId) await openSession(state.viewId);
   });
 

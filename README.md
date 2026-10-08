@@ -24,6 +24,11 @@ whisper-medium-int8, 37 s of Japanese speech.*
 machine is idle and loses that lead under realistic conditions — while also being the
 resource you were trying to protect.
 
+Those RTFs are for one 37 s clip. Real meetings arrive as 1–15 s utterances,
+and each one costs at least ~1.5 s on the NPU however short it is, so the RTF
+per utterance in three real meetings had a median of 0.44–1.33 — see
+[Real meetings](notes/benchmark-results.md#10-real-meetings-the-cost-is-per-utterance).
+
 Full numbers and method: **[notes/benchmark-results.md](notes/benchmark-results.md)**.
 Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/environment.md)**.
 
@@ -202,6 +207,30 @@ Three consequences worth knowing:
 - **Stopping drains rather than truncates.** The run stays in *残りを処理中*
   until every captured utterance has been through the ASR, then closes.
 
+### Starting before the meeting
+
+The ~170 s NPU compile can be paid before anyone is waiting:
+
+- **起動したら選択中のモデルを先読みする** (on by default) compiles the model
+  last used as soon as the app starts — unless the window would have refused it
+  (no runtime, an unusable model) or warned against it (a `large` model on the
+  NPU).
+- **Windows にサインインしたら最小化して起動する** (off by default) adds an
+  ordinary `HKCU\…\Run` entry that starts the app minimized. It is the same
+  entry Task Manager's startup page shows, so it can be switched off there too;
+  the checkbox reads the registry, including Task Manager's "disabled" mark,
+  rather than a saved setting.
+
+Together they mean the model is resident by the time the meeting starts. Signing
+in cannot be staged over SSH, so the binary checks the two halves itself:
+
+```powershell
+# the Run entry can be written, read back and removed (whatever was there is
+# put back), and the launch preload ends with the model resident
+.\meet-transcribe-app.exe --startup-check
+.\meet-transcribe-app.exe --startup-check whisper-tiny-int8-ov NPU   # quick stand-in
+```
+
 ### Where things go
 
 Transcripts and settings are in the **roaming** profile, where they have always
@@ -218,7 +247,12 @@ go in the **local** one, which is also what keeps them out of every update.
 ```
 
 One append-only file per run: a `meta` line, then one line per utterance, then an
-`end` line. Each utterance is on disk before it appears in the window, so a
+`end` line. Since v0.3.0 each utterance also records `waitS` (how long it queued
+before the device took it — `waitS + audioS × rtf` is how late the text appeared
+after the utterance ended), `tokens` / `maxTokens` (what the decoder produced and
+the cap it ran under) and, when a loop was cut, `repeatsRemoved`. `at` is *not*
+a wall clock: it is derived from captured samples, and WASAPI delivers none while
+nothing is playing. Each utterance is on disk before it appears in the window, so a
 crash costs nothing; a file with no `end` line is just an interrupted session and
 reads back fine. *書き出し* renders one as Markdown, *コピー* puts the same on the
 clipboard. Runs that captured nothing are discarded rather than left in the
@@ -393,6 +427,20 @@ cost is paid once at startup. `bench` prints `load/compile: N s` separately from
 **Language must be a token, not a bare code.**
 `set_language("<|ja|>")` works; `set_language("ja")` throws.
 
+**Whisper can loop until the decoder is full.** Now and then it repeats one
+phrase until it runs out of its 448 positions. On the NPU each token costs
+~49 ms, so in a real meeting one looping 15 s utterance took **36.7 s** and held
+up every utterance queued behind it. Every utterance is therefore decoded with
+`max_new_tokens` sized to its length — 12 tokens/s + 16, where the densest real
+speech measured was 10.8 tokens/s (`src/asr.rs`) — and a run of one phrase
+repeated four or more times is collapsed to one copy (`src/repeat.rs`). The log
+says when either happens. Two traps on the way: the Rust binding has no setter
+for `max_new_tokens` on a Whisper config (`get_generation_config()` returns a
+*copy*), so the capped configs are loaded from the model's own
+`generation_config.json` with the field added; and there is no streamer on
+`WhisperPipeline::generate`, so a loop cannot be cut the moment it starts, only
+bounded. `bench --clip 5 --max-new-tokens 8` proves the cap reaches the device.
+
 **Whisper hallucinates on near-silence.** Short blips reliably produced
 「ご視聴ありがとうございました」. `src/vad.rs` drops segments under 0.7 s, which
 removes almost all of it.
@@ -407,8 +455,11 @@ microphone capture, and the full `live` pipeline.
 Rough edges, honestly stated:
 
 - Startup latency on the NPU (above) — the biggest usability problem. The GUI
-  hides it behind a preload button and a resident pipeline, but it is still
-  minutes the first time.
+  hides it behind a resident pipeline, a preload at launch and an optional start
+  at sign-in, but if the app is started right before a meeting it is still
+  minutes.
+- Each utterance costs at least ~1.5 s on the NPU, so a run of short ones can
+  outpace it ([Real meetings](notes/benchmark-results.md#10-real-meetings-the-cost-is-per-utterance)).
 - Utterance-level latency only. Text appears when an utterance ends; there are no
   streaming partials yet (LocalAgreement-2 is the intended fix).
 - The benchmark clip is clean single-speaker TTS. Real meetings — overlapping
@@ -463,6 +514,23 @@ Two gaps, stated rather than papered over: the installer's `/R` relaunch after a
 self-update was not observed (nothing can launch a window on that machine), and
 an upgrade *between two different versions* has not been run — only a reinstall
 of the same one over itself.
+
+### What the loop cap and the sign-in preload were tested against
+
+On the reference machine (2026-10-08), over SSH:
+
+| | result |
+|---|---|
+| `cargo test --lib` | 6 passed: the budget never falls below the densest real speech (10.8 tokens/s) for 0.7–30 s; loops collapse, ordinary repetition does not |
+| `bench --clip 6`, tiny, NPU | 27 tokens under a cap of 88, full sentence |
+| same with `--max-new-tokens 4` | **4 / 4, cut at 「本日のテ」** — the cap built from JSON reaches the NPU's static pipeline |
+| `bench --clip 15`, medium, NPU | 74 tokens under a cap of 200, nothing cut; 3.7–4.1 s per run |
+| `--startup-check` with the saved settings (medium, NPU) | Run entry registered → on, removed → off, original state restored; launch preload resident after **177.6 s** |
+
+Not shown, and why: no loop was reproduced on demand (there is no recorded
+audio of one), so the cap is proven by forcing it and the collapse by unit tests;
+an actual sign-in and the minimized window need a desktop session; the two new
+checkboxes were checked for syntax only.
 
 ## Layout
 

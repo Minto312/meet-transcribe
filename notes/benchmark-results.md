@@ -184,3 +184,31 @@ Device attribution comes from
 `\GPU Engine(*luid_<npu>*engtype_compute)\Utilization Percentage`; the NPU's adapter
 LUID is detected automatically (`scripts/_common.ps1`), with the reasoning in
 [environment.md](environment.md).
+
+## 10. Real meetings: the cost is per utterance
+
+Read back afterwards from the transcripts the GUI saved: three real meetings,
+204 utterances, `whisper-medium-int8` on the NPU (July–August 2026). Inference
+time is `audioS × rtf` from each `seg` line.
+
+| Utterance length | n | Inference time (median, range across the meetings) |
+|---|---|---|
+| 0–2 s | 69 | 1.8 – 2.3 s |
+| 2–5 s | 54 | 2.1 – 3.3 s |
+| 5–10 s | 36 | 2.9 – 4.1 s |
+| 10 s and over | 45 | 4.9 – 6.3 s |
+
+- **Nothing took less than 1.5 s**, not even a 0.7 s utterance. Whisper's encoder
+  always processes a 30 s window, and the decoder then pays per token: a
+  least-squares fit over the 203 normal utterances gives
+  **inference ≈ 1.92 s + 48.6 ms × generated tokens**.
+- The per-utterance RTF had a median of **0.44 / 0.75 / 1.33** in the three
+  meetings. The 1.33 was the one made of short exchanges (median utterance
+  1.8 s): there the NPU spent longer on each utterance than the utterance lasted.
+- §1–§2's RTF of 0.2–0.3 is one 37 s clip in a single call, so the fixed cost is
+  spread thin. It understates what live use costs.
+- **One utterance looped**: 15 s of audio, 444 generated tokens (the decoder's
+  448 positions minus the prompt), **36.7 s**. Everything queued behind it waited.
+  That is why decoding is now capped by length — see the README.
+- Token density of real Japanese speech, counted with Whisper's tokenizer:
+  median 4.3 tokens/s, p90 6.5, maximum **10.8**. The cap is 12/s + 16.
