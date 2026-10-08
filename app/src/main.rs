@@ -15,16 +15,18 @@
 //! "DLL が見つかりません" dialog. See `openvino.rs`. `scripts/run_gui.ps1`
 //! remains as an explicit override for an install in an unusual place.
 //!
-//! Three console modes exist because the reference machine is driven over SSH
+//! Four console modes exist because the reference machine is driven over SSH
 //! and has no interactive desktop, so the halves of this app that a screenshot
-//! cannot check press their own buttons: `--selftest`, `--setup` and
-//! `--update-check`.
+//! cannot check press their own buttons: `--selftest`, `--setup`,
+//! `--update-check` and `--startup-check`.
 
 // No console window in release; the in-app log panel is the user-facing log.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]
 mod app;
+#[cfg(windows)]
+mod autostart;
 #[cfg(windows)]
 mod commands;
 #[cfg(windows)]
@@ -115,6 +117,10 @@ fn main() {
         }
         if args.iter().any(|a| a == "--update-check") {
             app::run_update_probe(update_options(&args));
+        }
+        if let Some(index) = args.iter().position(|a| a == "--startup-check") {
+            let model = args.get(index + 1).cloned().zip(args.get(index + 2).cloned());
+            app::run_startup_probe(model);
         }
         if let Some(index) = args.iter().position(|a| a == "--setup") {
             let target = args

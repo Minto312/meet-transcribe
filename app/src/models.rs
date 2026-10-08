@@ -72,6 +72,17 @@ pub fn is_usable(dir: &Path) -> bool {
     inspect(dir).is_some_and(|info| info.usable)
 }
 
+/// Whether `dir` can be compiled for `device` without anyone asking for it.
+///
+/// Stricter than [`is_usable`]: the preload at launch runs with nobody watching,
+/// so it must not start a compile the picker would have warned against (a
+/// `large` model on the NPU), let alone one it would have refused.
+pub fn is_preloadable(dir: &Path, device: &str) -> bool {
+    inspect(dir).is_some_and(|info| {
+        info.usable && !info.unsupported_devices.iter().any(|d| d == device)
+    })
+}
+
 fn inspect(path: &Path) -> Option<ModelInfo> {
     let name = path.file_name()?.to_string_lossy().into_owned();
 

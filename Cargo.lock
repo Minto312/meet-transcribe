@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "meet-transcribe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2373,13 +2373,14 @@ dependencies = [
  "hound",
  "openvino-genai",
  "serde",
+ "serde_json",
  "voice_activity_detector",
  "wasapi",
 ]
 
 [[package]]
 name = "meet-transcribe-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2395,6 +2396,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-updater",
+ "winreg",
  "zip",
 ]
 

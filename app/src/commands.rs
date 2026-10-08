@@ -297,6 +297,18 @@ pub fn cancel_setup(state: State<'_, AppState>) {
     state.setup.cancel();
 }
 
+// ----------------------------------------------------------------- autostart
+
+#[tauri::command]
+pub fn autostart_enabled() -> bool {
+    crate::autostart::is_enabled()
+}
+
+#[tauri::command]
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    crate::autostart::set_enabled(enabled).map_err(to_message)
+}
+
 // -------------------------------------------------------------------- updates
 
 #[tauri::command]

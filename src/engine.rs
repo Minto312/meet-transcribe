@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender, TrySendError};
 use serde::{Deserialize, Serialize};
 
-use crate::asr::WhisperAsr;
+use crate::asr::{TranscribeResult, WhisperAsr};
 use crate::capture::{AudioCapture, DeviceKind, DeviceSelection};
 use crate::vad::SpeechSegmenter;
 
@@ -183,10 +183,21 @@ pub struct SegmentEvent {
     /// Where the utterance started, in seconds from the start of capture.
     pub offset_s: f64,
     pub audio_s: f64,
+    /// Seconds the utterance waited between leaving the VAD and reaching the
+    /// device: behind earlier utterances, or behind a model still compiling.
+    /// The text appeared `wait_s + infer_s` after the VAD closed the utterance.
+    pub wait_s: f64,
     pub infer_s: f64,
     /// Real-Time Factor: compute time / audio duration. Below 1.0 keeps up.
     pub rtf: f64,
     pub text: String,
+    /// Tokens the decoder produced, and the cap it ran under. Recorded so a
+    /// transcript can later show how often the cap, rather than the end of
+    /// speech, is what stopped decoding.
+    pub tokens: Option<usize>,
+    pub max_tokens: Option<usize>,
+    /// Characters of a repetition loop removed from `text`.
+    pub repeats_removed: usize,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -250,6 +261,7 @@ enum AsrJob {
         index: u64,
         offset_s: f64,
         samples: Vec<f32>,
+        submitted: Instant,
     },
     Shutdown,
 }
@@ -674,17 +686,26 @@ fn asr_worker(rx: Receiver<AsrJob>, notice: Sender<Notice>, evt: Sender<EngineEv
                 index,
                 offset_s,
                 samples,
+                submitted,
             } => {
+                let wait_s = submitted.elapsed().as_secs_f64();
                 match current.as_mut() {
                     Some((_, asr)) => match asr.transcribe(&samples) {
                         Ok(result) => {
+                            if let Some(message) = loop_report(index, &result) {
+                                let _ = evt.send(EngineEvent::Log(LogRecord::warn(message)));
+                            }
                             if !result.text.is_empty() {
                                 let _ = evt.send(EngineEvent::Segment(SegmentEvent {
                                     index,
                                     offset_s,
                                     audio_s: result.audio_seconds,
+                                    wait_s,
                                     infer_s: result.infer_seconds,
                                     rtf: result.rtf(),
+                                    tokens: result.generated_tokens,
+                                    max_tokens: result.max_new_tokens,
+                                    repeats_removed: result.repeats_removed,
                                     text: result.text,
                                 }));
                             }
@@ -703,6 +724,27 @@ fn asr_worker(rx: Receiver<AsrJob>, notice: Sender<Notice>, evt: Sender<EngineEv
             }
         }
     }
+}
+
+/// Say so when an utterance came back looping. Without the cap one of these
+/// held the queue for 36.7 s; with it the cost is bounded, but it is still the
+/// most likely reason text shows up late, so it should not pass silently.
+fn loop_report(index: u64, result: &TranscribeResult) -> Option<String> {
+    let cap = result.max_new_tokens.filter(|_| result.hit_token_cap());
+    let removed = result.repeats_removed;
+    let what = match (cap, removed) {
+        (None, 0) => return None,
+        (Some(cap), 0) => format!("生成が上限の {cap} トークンに達したため打ち切りました"),
+        (None, removed) => format!("同じ句の繰り返し {removed} 文字を除去しました"),
+        (Some(cap), removed) => format!(
+            "同じ句の繰り返しを検出しました。生成を上限の {cap} トークンで打ち切り、\
+             繰り返し {removed} 文字を除去しました"
+        ),
+    };
+    Some(format!(
+        "#{index}: {what} ({:.1} 秒の発話に {:.1} 秒)",
+        result.audio_seconds, result.infer_seconds
+    ))
 }
 
 // -------------------------------------------------------------- capture thread
@@ -786,6 +828,7 @@ fn capture_worker(
                     index,
                     offset_s: utterance.start_seconds(),
                     samples: utterance.samples,
+                    submitted: Instant::now(),
                 };
                 match asr_tx.try_send(job) {
                     Ok(()) => submitted.store(index + 1, Ordering::Relaxed),

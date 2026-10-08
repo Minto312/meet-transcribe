@@ -1,6 +1,6 @@
 [package]
 name = "meet-transcribe-app"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Desktop UI for meet-transcribe: model / device / audio-source pickers and saved transcripts"
@@ -49,3 +49,5 @@ crossbeam-channel = "0.5"
 # Used to prove openvino_genai_c.dll actually resolves before the ASR thread
 # relies on the delay-loaded import (see app/src/openvino.rs).
 libloading = "0.8"
+# The sign-in `Run` entry (autostart.rs). Already in the tree through Tauri.
+winreg = "0.55"

@@ -50,6 +50,9 @@ pub struct Settings {
     pub auto_scroll: bool,
     /// Show the per-utterance duration / RTF badge.
     pub show_metrics: bool,
+    /// Compile the selected model as soon as the app starts. Paired with
+    /// starting at sign-in, the NPU's ~170 s is over before the meeting.
+    pub preload_on_launch: bool,
 }
 
 impl Default for Settings {
@@ -66,6 +69,7 @@ impl Default for Settings {
             min_silence_ms: DEFAULT_MIN_SILENCE_MS,
             auto_scroll: true,
             show_metrics: true,
+            preload_on_launch: true,
         }
     }
 }
@@ -114,6 +118,24 @@ pub struct SegmentRecord {
     /// Wall-clock time the utterance began.
     pub at: DateTime<Local>,
     pub text: String,
+    // Everything below is absent from transcripts written before v0.3.0.
+    /// Seconds the utterance queued before the device took it. With `rtf` it
+    /// gives how late the text appeared, which `at` cannot: `at` is derived
+    /// from captured samples, and WASAPI delivers none while nothing plays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_s: Option<f64>,
+    /// Tokens decoded, and the cap they were decoded under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    /// Characters of a repetition loop removed from `text`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub repeats_removed: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -285,6 +307,10 @@ impl SessionStore {
             rtf: event.rtf,
             at,
             text: event.text.clone(),
+            wait_s: Some(event.wait_s),
+            tokens: event.tokens,
+            max_tokens: event.max_tokens,
+            repeats_removed: event.repeats_removed,
         };
         writeln!(
             active.file,

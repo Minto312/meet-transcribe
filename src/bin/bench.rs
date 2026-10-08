@@ -32,6 +32,14 @@ struct Args {
     runs: usize,
     #[arg(long, default_value = "ja")]
     language: String,
+    /// Use only the first N seconds of the audio. Real utterances are 1-15 s
+    /// and fit one 30 s window; the whole sample clip does not.
+    #[arg(long)]
+    clip: Option<f64>,
+    /// Decode with this cap instead of one sized to the audio. Set it low to
+    /// prove the cap actually reaches the device: the text must come back short.
+    #[arg(long)]
+    max_new_tokens: Option<usize>,
 }
 
 fn load_wav_16k_mono(path: &str) -> Result<Vec<f32>> {
@@ -63,7 +71,10 @@ fn median(mut xs: Vec<f64>) -> f64 {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let audio = load_wav_16k_mono(&args.audio)?;
+    let mut audio = load_wav_16k_mono(&args.audio)?;
+    if let Some(clip) = args.clip {
+        audio.truncate((clip * 16_000.0) as usize);
+    }
     let dur = audio.len() as f64 / 16_000.0;
     println!("audio: {} ({dur:.1}s @ 16k mono)\n", args.audio);
 
@@ -83,10 +94,18 @@ fn main() -> Result<()> {
             }
         };
         println!("  load/compile: {:.1}s", t_load.elapsed().as_secs_f64());
+        asr.force_max_new_tokens(args.max_new_tokens);
 
         // First run pays model compile + kernel JIT; report but don't count it.
         let warm = asr.transcribe(&audio)?;
-        println!("  warmup: {:6.2}s  RTF={:.3}", warm.infer_seconds, warm.rtf());
+        println!(
+            "  warmup: {:6.2}s  RTF={:.3}  tokens={:?}/{:?}{}",
+            warm.infer_seconds,
+            warm.rtf(),
+            warm.generated_tokens,
+            warm.max_new_tokens,
+            if warm.hit_token_cap() { " (hit the cap)" } else { "" }
+        );
 
         let mut rtfs = Vec::with_capacity(args.runs);
         for i in 0..args.runs {

@@ -8,9 +8,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use meet_transcribe::engine::{
-    Engine, EngineCommand, EngineEvent, EngineStatus, LogRecord, Phase,
+    Engine, EngineCommand, EngineEvent, EngineStatus, LogRecord, ModelSpec, Phase,
 };
 
+use crate::autostart;
 use crate::models;
 use crate::openvino::OpenvinoStatus;
 use crate::setup::{self, Paths, SetupState};
@@ -227,6 +228,8 @@ fn build(on_ready: impl FnOnce(&AppHandle) + Send + 'static) -> tauri::Result<()
             crate::commands::download_openvino,
             crate::commands::download_model,
             crate::commands::cancel_setup,
+            crate::commands::autostart_enabled,
+            crate::commands::set_autostart,
             crate::commands::app_version,
             crate::commands::check_update,
             crate::commands::install_update,
@@ -235,8 +238,138 @@ fn build(on_ready: impl FnOnce(&AppHandle) + Send + 'static) -> tauri::Result<()
 }
 
 pub fn run() {
-    build(|app| update::spawn_startup_check(app.clone()))
-        .expect("meet-transcribe GUI の起動に失敗しました");
+    let autostarted = std::env::args().any(|a| a == autostart::FLAG);
+    build(move |app| {
+        if autostarted {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.minimize();
+            }
+        }
+        update::spawn_startup_check(app.clone());
+        let _ = preload_at_launch(app);
+    })
+    .expect("meet-transcribe GUI の起動に失敗しました");
+}
+
+/// Compile the model the app was last used with, as soon as it starts.
+///
+/// NPU compilation is minutes and is not cached between processes, so this is
+/// what makes 開始 instant in a meeting — provided the app started well before
+/// it, which is what `autostart` is for. Nobody is watching when it runs, so it
+/// stays out of anything the window would have refused or warned about.
+/// Returns what it asked the engine to load, or why it did not.
+fn preload_at_launch(app: &AppHandle) -> Result<ModelSpec, &'static str> {
+    let state = app.state::<AppState>();
+    let settings = state.settings.lock().unwrap().clone();
+    if !settings.preload_on_launch {
+        return Err("起動時の先読みが無効になっています");
+    }
+    if !matches!(*state.openvino.lock().unwrap(), OpenvinoStatus::Ready { .. }) {
+        return Err("OpenVINO ランタイムが見つかりません");
+    }
+    let (Some(models_dir), Some(model)) = (settings.models_dir, settings.model) else {
+        return Err("モデルがまだ選ばれていません");
+    };
+    let dir = models_dir.join(model);
+    if !models::is_preloadable(&dir, &settings.device) {
+        return Err("選ばれているモデルはこのデバイスで読み込めません");
+    }
+    let spec = ModelSpec {
+        dir,
+        device: settings.device,
+        language: settings.language,
+    };
+    state.engine.send(EngineCommand::Preload(spec.clone()));
+    Ok(spec)
+}
+
+/// `--startup-check [model-name device]`: what happens at sign-in, from a
+/// console.
+///
+/// Signing in cannot be staged over SSH, so this checks the two halves of it:
+/// that the `Run` entry can be written, read back and removed again (leaving it
+/// as it was found), and that the preload at launch really reaches the engine
+/// and ends with the model resident. The optional arguments replace the saved
+/// model and device for this run only, so a small model can stand in for the
+/// minutes `medium` takes on the NPU.
+pub fn run_startup_probe(model: Option<(String, String)>) -> ! {
+    let result = build(move |app| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("mt-startup-probe".to_string())
+            .spawn(move || std::process::exit(startup_probe(&app, model)))
+            .expect("プローブスレッドを起動できません");
+    });
+
+    if let Err(error) = result {
+        eprintln!("--startup-check を実行できません: {error}");
+    }
+    std::process::exit(1);
+}
+
+fn startup_probe(app: &AppHandle, model: Option<(String, String)>) -> i32 {
+    let mut failed = false;
+
+    let saved = autostart::save();
+    let before = autostart::is_enabled();
+    let on = autostart::set_enabled(true).map(|()| autostart::is_enabled());
+    let off = autostart::set_enabled(false).map(|()| autostart::is_enabled());
+    let restored = autostart::restore(&saved).map(|()| autostart::is_enabled());
+    println!(
+        "autostart: before={before} register->{on:?} unregister->{off:?} restored->{restored:?}"
+    );
+    if !matches!((&on, &off), (Ok(true), Ok(false)))
+        || !matches!(&restored, Ok(after) if *after == before)
+    {
+        failed = true;
+    }
+
+    let state = app.state::<AppState>();
+    if let Some((name, device)) = model {
+        let mut settings = state.settings.lock().unwrap();
+        settings.model = Some(name);
+        settings.device = device;
+        settings.preload_on_launch = true;
+    }
+    let started = std::time::Instant::now();
+    match preload_at_launch(app) {
+        Ok(spec) => println!("preload: asked for {} on {}", spec.name(), spec.device),
+        Err(reason) => {
+            println!("preload: not started: {reason}");
+            println!("VERDICT: FAILED");
+            return 1;
+        }
+    }
+    // The bridge mirrors every status the engine pushes into `state.status`.
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let status = state.status.lock().unwrap().clone();
+        if status.model_loaded {
+            println!(
+                "preload: resident after {:.1} s (compile {:.1} s), phase {:?}",
+                started.elapsed().as_secs_f64(),
+                status.load_seconds.unwrap_or(f64::NAN),
+                status.phase
+            );
+            break;
+        }
+        if let Some(error) = status.error {
+            println!("preload: FAILED {error}");
+            failed = true;
+            break;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(600) {
+            println!("preload: still not resident after 600 s");
+            failed = true;
+            break;
+        }
+    }
+
+    println!("VERDICT: {}", if failed { "FAILED" } else { "sign-in path works." });
+    i32::from(failed)
 }
 
 /// `--setup <openvino|OpenVINO/whisper-…>`: run one setup download from a

@@ -6,7 +6,7 @@ members = ["app"]
 
 [package]
 name = "meet-transcribe"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Real-time Japanese transcription of Windows desktop audio on an Intel NPU, via OpenVINO GenAI Whisper (NPU/iGPU/CPU switchable)"
@@ -33,6 +33,9 @@ hound = "3"          # WAV loading (bench)
 crossbeam-channel = "0.5"
 # Device / segment / config types cross the Tauri IPC boundary as JSON.
 serde = { version = "1", features = ["derive"] }
+# `asr.rs` derives a capped decoding config from the model's own
+# generation_config.json (the binding cannot set `max_new_tokens` directly).
+serde_json = "1"
 
 # WASAPI loopback capture is Windows-only.
 [target.'cfg(windows)'.dependencies]
