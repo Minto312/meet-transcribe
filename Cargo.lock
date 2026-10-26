@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "meet-transcribe"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "meet-transcribe-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",

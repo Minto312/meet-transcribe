@@ -48,6 +48,7 @@ Hardware, driver versions, and Windows gotchas: **[notes/environment.md](notes/e
 | `diag` | Bisect an OpenVINO exception (audio length / language config / device) |
 | `capture_probe` | Verify WASAPI loopback capture on its own, independent of ASR |
 | `engine_probe` | Drive the GUI's engine from a console — start, capture, stop, drain — with no window |
+| `batch_bench` | Split a WAV with the live VAD settings and time it one call per utterance vs. batched as the engine does |
 
 ```
 [WASAPI]  a render endpoint opened with Direction::Capture = the system mix
@@ -206,6 +207,16 @@ Three consequences worth knowing:
   dies.
 - **Stopping drains rather than truncates.** The run stays in *残りを処理中*
   until every captured utterance has been through the ASR, then closes.
+- **A backlog is transcribed several utterances at a time.** Whisper's encoder
+  always processes a 30 s window, so each call on the NPU costs 2–2.6 s before
+  any text is decoded. When the ASR thread takes an utterance and more are
+  already queued behind it, it joins them (0.3 s of silence between, up to
+  28 s) and transcribes them in one call (`src/batch.rs`). An utterance that
+  reaches an idle device still goes alone, at once, so a quiet meeting is not
+  slowed down. A batched line shows *N 発話まとめ* and carries the first
+  utterance's time. On the sample clip (8 utterances, medium on the NPU) a
+  full backlog drained in **43–44 % less** inference time with the same text —
+  [notes/benchmark-results.md §11](notes/benchmark-results.md#11-batching-a-backlog).
 
 ### Starting before the meeting
 
@@ -250,7 +261,8 @@ One append-only file per run: a `meta` line, then one line per utterance, then a
 `end` line. Since v0.3.0 each utterance also records `waitS` (how long it queued
 before the device took it — `waitS + audioS × rtf` is how late the text appeared
 after the utterance ended), `tokens` / `maxTokens` (what the decoder produced and
-the cap it ran under) and, when a loop was cut, `repeatsRemoved`. `at` is *not*
+the cap it ran under) and, when a loop was cut, `repeatsRemoved`; since v0.4.0,
+`utterances` when a backlog was joined into one line. `at` is *not*
 a wall clock: it is derived from captured samples, and WASAPI delivers none while
 nothing is playing. Each utterance is on disk before it appears in the window, so a
 crash costs nothing; a file with no `end` line is just an interrupted session and
@@ -359,11 +371,12 @@ it is visible in a screenshot. So the binary can drive itself:
 # is the feed reachable and does latest.json parse?
 .\meet-transcribe-app.exe --update-check
 
-# download it and verify the signature, even if it is not newer than what is
-# running -- this is what proves the signing key matches the compiled-in pubkey
+# the same, accepting the newest release even if it is what is running
 .\meet-transcribe-app.exe --update-check --force
 
-# ... and actually run the installer
+# download it, verify the signature against the compiled-in pubkey, and run the
+# installer. Download and verification only happen here: there is no stage that
+# verifies without installing
 .\meet-transcribe-app.exe --update-check --force --apply
 
 # ... against a feed that is not the configured one
@@ -458,8 +471,16 @@ Rough edges, honestly stated:
   hides it behind a resident pipeline, a preload at launch and an optional start
   at sign-in, but if the app is started right before a meeting it is still
   minutes.
-- Each utterance costs at least ~1.5 s on the NPU, so a run of short ones can
+- Each call costs at least ~1.5 s on the NPU, so a run of short utterances can
   outpace it ([Real meetings](notes/benchmark-results.md#10-real-meetings-the-cost-is-per-utterance)).
+  Batching the backlog shares that cost out, but the first utterance of a burst
+  still pays it alone.
+- **The NPU can time out at the driver level (TDR).** `generate()` then throws
+  `unknown exception`, and keeps throwing on that pipeline — the app does not
+  yet rebuild it, so transcription stops until the next launch. Windows logs
+  `LKD_0x141_Tdr:6_IMAGE_npu_kmd.sys` (Application, event 1001) for that minute.
+  Seen in a live meeting (2026-07-27, driver 32.0.100.4724) and in a benchmark
+  (2026-10-26, driver 32.0.100.5540).
 - Utterance-level latency only. Text appears when an utterance ends; there are no
   streaming partials yet (LocalAgreement-2 is the intended fix).
 - The benchmark clip is clean single-speaker TTS. Real meetings — overlapping
@@ -532,6 +553,22 @@ audio of one), so the cap is proven by forcing it and the collapse by unit tests
 an actual sign-in and the minimized window need a desktop session; the two new
 checkboxes were checked for syntax only.
 
+### What batching was tested against
+
+On the reference machine (2026-10-26), NPU driver 32.0.100.5540:
+
+| | result |
+|---|---|
+| `cargo test --lib` | 13 passed, including the engine taking what is queued, stopping at a `Load`, and holding audio that does not fit for the next batch |
+| `batch_bench`, tiny | 8 utterances → 2 calls; 17 % / 47 % less over two rounds (tiny's fixed cost is small to begin with) |
+| `batch_bench`, medium | 8 calls 20.3 / 21.3 s → 2 calls 11.3 / 12.2 s, **43 % / 44 % less**; same transcript |
+
+Not shown: the engine batching a real backlog end to end (that needs audio
+played into the system mix, i.e. out of the speakers), and the badge in the
+window. The first medium run also died with `unknown exception` on its sixth
+call — before any batch — and Windows logged `LKD_0x141_Tdr:6_IMAGE_npu_kmd.sys`
+for that minute: the NPU TDR described in Status, not something batching does.
+
 ## Layout
 
 ```
@@ -541,7 +578,9 @@ src/vad.rs                 Silero VAD streaming segmentation
 src/engine.rs              threaded orchestration behind the GUI (model cache,
                            bounded queue, run state machine)
 src/audio.rs               downmix / resample helpers
-src/bin/{live,bench,diag,capture_probe,engine_probe}.rs
+src/batch.rs               joining a backlog of utterances into one window
+src/repeat.rs              collapsing a repetition loop in Whisper's output
+src/bin/{live,bench,batch_bench,diag,capture_probe,engine_probe}.rs
 app/                       the Tauri GUI (its own package in the workspace)
   app/src/                 state, engine->webview bridge, commands, session store
   app/src/openvino.rs      locating the runtime at startup (see the GUI section)

@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender, TrySendError};
 use serde::{Deserialize, Serialize};
 
-use crate::asr::{TranscribeResult, WhisperAsr};
+use crate::asr::{TranscribeResult, WhisperAsr, SAMPLE_RATE};
+use crate::batch;
 use crate::capture::{AudioCapture, DeviceKind, DeviceSelection};
 use crate::vad::SpeechSegmenter;
 
@@ -198,6 +199,10 @@ pub struct SegmentEvent {
     pub max_tokens: Option<usize>,
     /// Characters of a repetition loop removed from `text`.
     pub repeats_removed: usize,
+    /// How many utterances went into this one: more than 1 when a backlog was
+    /// transcribed together (see `batch.rs`). `index`, `offset_s` and `wait_s`
+    /// are then the first one's, and `audio_s` is their speech without the gaps.
+    pub utterances: u64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -257,13 +262,16 @@ impl Engine {
 
 enum AsrJob {
     Load(ModelSpec),
-    Work {
-        index: u64,
-        offset_s: f64,
-        samples: Vec<f32>,
-        submitted: Instant,
-    },
+    Work(Queued),
     Shutdown,
+}
+
+/// One utterance waiting for the device.
+struct Queued {
+    index: u64,
+    offset_s: f64,
+    samples: Vec<f32>,
+    submitted: Instant,
 }
 
 enum Notice {
@@ -643,8 +651,18 @@ fn asr_worker(rx: Receiver<AsrJob>, notice: Sender<Notice>, evt: Sender<EngineEv
     // Held across runs on purpose: recompiling `medium` on the NPU costs ~170 s,
     // so a stop/start of the same model must not pay it twice.
     let mut current: Option<(ModelSpec, WhisperAsr)> = None;
+    // A job taken off the channel while gathering a batch that turned out not
+    // to belong in it. It is handled next, so the FIFO order still holds.
+    let mut held: Option<AsrJob> = None;
 
-    while let Ok(job) = rx.recv() {
+    loop {
+        let job = match held.take() {
+            Some(job) => job,
+            None => match rx.recv() {
+                Ok(job) => job,
+                Err(_) => break,
+            },
+        };
         match job {
             AsrJob::Shutdown => break,
 
@@ -682,46 +700,88 @@ fn asr_worker(rx: Receiver<AsrJob>, notice: Sender<Notice>, evt: Sender<EngineEv
                 }
             }
 
-            AsrJob::Work {
-                index,
-                offset_s,
-                samples,
-                submitted,
-            } => {
-                let wait_s = submitted.elapsed().as_secs_f64();
-                match current.as_mut() {
-                    Some((_, asr)) => match asr.transcribe(&samples) {
-                        Ok(result) => {
-                            if let Some(message) = loop_report(index, &result) {
-                                let _ = evt.send(EngineEvent::Log(LogRecord::warn(message)));
-                            }
-                            if !result.text.is_empty() {
-                                let _ = evt.send(EngineEvent::Segment(SegmentEvent {
-                                    index,
-                                    offset_s,
-                                    audio_s: result.audio_seconds,
-                                    wait_s,
-                                    infer_s: result.infer_seconds,
-                                    rtf: result.rtf(),
-                                    tokens: result.generated_tokens,
-                                    max_tokens: result.max_new_tokens,
-                                    repeats_removed: result.repeats_removed,
-                                    text: result.text,
-                                }));
-                            }
-                        }
-                        Err(e) => {
-                            let _ = evt.send(EngineEvent::Log(LogRecord::error(format!(
-                                "文字起こしに失敗しました (#{index}): {e:#}"
-                            ))));
-                        }
-                    },
+            AsrJob::Work(first) => {
+                let handled = match current.as_mut() {
+                    Some((_, asr)) => {
+                        let (batch, next) = gather(first, &rx);
+                        held = next;
+                        transcribe_batch(asr, &batch, &evt);
+                        batch.len()
+                    }
                     // The load failed; this audio can never be transcribed. Still
                     // report Done so the controller's finalize counter completes.
-                    None => {}
+                    None => 1,
+                };
+                for _ in 0..handled {
+                    let _ = notice.send(Notice::Done);
                 }
-                let _ = notice.send(Notice::Done);
             }
+        }
+    }
+}
+
+/// `first`, plus whatever is already queued behind it as long as it fits one
+/// window. Also returns the job that ended the batch, when one was taken off
+/// the channel without belonging in it (a `Load`, or audio that did not fit).
+fn gather(first: Queued, rx: &Receiver<AsrJob>) -> (Vec<Queued>, Option<AsrJob>) {
+    let mut len = batch::grown(0, first.samples.len());
+    let mut queued = vec![first];
+    loop {
+        match rx.try_recv() {
+            Ok(AsrJob::Work(next)) if batch::fits(len, next.samples.len()) => {
+                len = batch::grown(len, next.samples.len());
+                queued.push(next);
+            }
+            Ok(other) => return (queued, Some(other)),
+            Err(_) => return (queued, None),
+        }
+    }
+}
+
+fn transcribe_batch(asr: &mut WhisperAsr, queued: &[Queued], evt: &Sender<EngineEvent>) {
+    let first = &queued[0];
+    let label = match queued.last() {
+        Some(last) if queued.len() > 1 => format!("#{}–#{}", first.index, last.index),
+        _ => format!("#{}", first.index),
+    };
+    let wait_s = first.submitted.elapsed().as_secs_f64();
+    let joined;
+    let audio = if queued.len() == 1 {
+        first.samples.as_slice()
+    } else {
+        joined = batch::join(queued.iter().map(|q| q.samples.as_slice()));
+        joined.as_slice()
+    };
+    // Speech only, without the gaps: the session's total stays the audio that
+    // was captured, and `audio_s × rtf` stays the inference time.
+    let speech_s = queued.iter().map(|q| q.samples.len()).sum::<usize>() as f64
+        / SAMPLE_RATE as f64;
+
+    match asr.transcribe(audio) {
+        Ok(result) => {
+            if let Some(message) = loop_report(&label, &result) {
+                let _ = evt.send(EngineEvent::Log(LogRecord::warn(message)));
+            }
+            if !result.text.is_empty() {
+                let _ = evt.send(EngineEvent::Segment(SegmentEvent {
+                    index: first.index,
+                    offset_s: first.offset_s,
+                    audio_s: speech_s,
+                    wait_s,
+                    infer_s: result.infer_seconds,
+                    rtf: result.infer_seconds / speech_s,
+                    tokens: result.generated_tokens,
+                    max_tokens: result.max_new_tokens,
+                    repeats_removed: result.repeats_removed,
+                    utterances: queued.len() as u64,
+                    text: result.text,
+                }));
+            }
+        }
+        Err(e) => {
+            let _ = evt.send(EngineEvent::Log(LogRecord::error(format!(
+                "文字起こしに失敗しました ({label}): {e:#}"
+            ))));
         }
     }
 }
@@ -729,7 +789,7 @@ fn asr_worker(rx: Receiver<AsrJob>, notice: Sender<Notice>, evt: Sender<EngineEv
 /// Say so when an utterance came back looping. Without the cap one of these
 /// held the queue for 36.7 s; with it the cost is bounded, but it is still the
 /// most likely reason text shows up late, so it should not pass silently.
-fn loop_report(index: u64, result: &TranscribeResult) -> Option<String> {
+fn loop_report(label: &str, result: &TranscribeResult) -> Option<String> {
     let cap = result.max_new_tokens.filter(|_| result.hit_token_cap());
     let removed = result.repeats_removed;
     let what = match (cap, removed) {
@@ -742,7 +802,7 @@ fn loop_report(index: u64, result: &TranscribeResult) -> Option<String> {
         ),
     };
     Some(format!(
-        "#{index}: {what} ({:.1} 秒の発話に {:.1} 秒)",
+        "{label}: {what} ({:.1} 秒の発話に {:.1} 秒)",
         result.audio_seconds, result.infer_seconds
     ))
 }
@@ -824,12 +884,12 @@ fn capture_worker(
                 // Reserve the index only if the send succeeds, so indices stay
                 // dense and the finalize counter stays exact.
                 let index = submitted.load(Ordering::Relaxed);
-                let job = AsrJob::Work {
+                let job = AsrJob::Work(Queued {
                     index,
                     offset_s: utterance.start_seconds(),
                     samples: utterance.samples,
                     submitted: Instant::now(),
-                };
+                });
                 match asr_tx.try_send(job) {
                     Ok(()) => submitted.store(index + 1, Ordering::Relaxed),
                     Err(TrySendError::Full(_)) => {
@@ -864,4 +924,71 @@ fn capture_worker(
     let _ = notice.send(Notice::CaptureStopped {
         submitted: submitted.load(Ordering::Relaxed),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const S: usize = SAMPLE_RATE as usize;
+
+    fn work(index: u64, seconds: usize) -> AsrJob {
+        AsrJob::Work(Queued {
+            index,
+            offset_s: 0.0,
+            samples: vec![0.0; seconds * S],
+            submitted: Instant::now(),
+        })
+    }
+
+    fn first(job: AsrJob) -> Queued {
+        match job {
+            AsrJob::Work(queued) => queued,
+            _ => unreachable!(),
+        }
+    }
+
+    fn indices(queued: &[Queued]) -> Vec<u64> {
+        queued.iter().map(|q| q.index).collect()
+    }
+
+    #[test]
+    fn gathers_what_is_queued_and_stops_at_a_load() {
+        let (tx, rx) = bounded(16);
+        for i in 1..4 {
+            tx.send(work(i, 2)).unwrap();
+        }
+        tx.send(AsrJob::Load(ModelSpec {
+            dir: PathBuf::from("m"),
+            device: "NPU".into(),
+            language: "ja".into(),
+        }))
+        .unwrap();
+        tx.send(work(4, 2)).unwrap();
+
+        let (batch, held) = gather(first(work(0, 2)), &rx);
+        assert_eq!(indices(&batch), [0, 1, 2, 3]);
+        assert!(matches!(held, Some(AsrJob::Load(_))));
+        // The utterance behind the Load is left for after it.
+        assert_eq!(rx.len(), 1);
+    }
+
+    #[test]
+    fn audio_that_does_not_fit_is_held_for_the_next_batch() {
+        let (tx, rx) = bounded(16);
+        tx.send(work(1, 10)).unwrap();
+        tx.send(work(2, 10)).unwrap();
+
+        let (batch, held) = gather(first(work(0, 10)), &rx);
+        assert_eq!(indices(&batch), [0, 1]);
+        assert!(matches!(held, Some(AsrJob::Work(ref q)) if q.index == 2));
+    }
+
+    #[test]
+    fn nothing_queued_means_a_batch_of_one() {
+        let (_tx, rx) = bounded::<AsrJob>(16);
+        let (batch, held) = gather(first(work(0, 3)), &rx);
+        assert_eq!(indices(&batch), [0]);
+        assert!(held.is_none());
+    }
 }

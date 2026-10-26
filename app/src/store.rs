@@ -132,10 +132,22 @@ pub struct SegmentRecord {
     /// Characters of a repetition loop removed from `text`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub repeats_removed: usize,
+    /// Utterances transcribed together into this line when a backlog was
+    /// batched (since v0.4.0); absent when it was just the one.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub utterances: u64,
 }
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+fn one() -> u64 {
+    1
+}
+
+fn is_one(n: &u64) -> bool {
+    *n == 1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -311,6 +323,7 @@ impl SessionStore {
             tokens: event.tokens,
             max_tokens: event.max_tokens,
             repeats_removed: event.repeats_removed,
+            utterances: event.utterances,
         };
         writeln!(
             active.file,

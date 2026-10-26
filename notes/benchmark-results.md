@@ -212,3 +212,28 @@ time is `audioS × rtf` from each `seg` line.
   That is why decoding is now capped by length — see the README.
 - Token density of real Japanese speech, counted with Whisper's tokenizer:
   median 4.3 tokens/s, p90 6.5, maximum **10.8**. The cap is 12/s + 16.
+
+## 11. Batching a backlog
+
+`batch_bench` splits `sample_ja.wav` with the live VAD settings (8 utterances,
+33.5 s of speech) and transcribes it two ways on one pipeline: one call per
+utterance, and joined by `batch::plan` (0.3 s gaps, up to 28 s) — 2 calls.
+2026-10-26, NPU driver **32.0.100.5540**.
+
+| Model | One call each (8 calls) | Batched (2 calls) | Saving |
+|---|---|---|---|
+| medium-int8 | 20.31 s / 21.28 s | 11.34 s / 12.17 s | **44 % / 43 %** |
+| tiny-int8 | 2.22 s / 2.40 s | 1.85 s / 1.27 s | 17 % / 47 % |
+
+- Per call on medium the fixed cost dominates: 2.1–2.8 s for utterances of
+  2.1–5.8 s, so eight short utterances pay it eight times. A batch of five
+  (23.3 s) took 7.2 s.
+- The text is the same; batched lines read as joined sentences
+  (「…始めます。まず先週の…」) and if anything gained a comma.
+- Compile time on this driver: 266.8 s on the first run of the day, **83.4 s**
+  on the next. With driver 32.0.100.4724 a second run was no faster (§5), so the
+  cache may now be working — one pair of runs, not yet confirmed.
+- The first medium run hit an NPU TDR on its sixth call (`unknown exception`;
+  `LKD_0x141_Tdr:6_IMAGE_npu_kmd.sys` in the Application log) — in the
+  one-call-each phase, before any batch was sent.
+
