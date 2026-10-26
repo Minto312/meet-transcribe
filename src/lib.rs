@@ -10,6 +10,7 @@
 
 pub mod asr;
 pub mod audio;
+pub mod batch;
 pub mod repeat;
 pub mod vad;
 

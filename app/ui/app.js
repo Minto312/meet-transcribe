@@ -205,6 +205,7 @@ function segmentNode(segment) {
     // Only worth a word when the utterance actually queued; absent from
     // transcripts recorded before it was tracked.
     if (segment.waitS >= 0.5) parts.push(`待ち ${segment.waitS.toFixed(1)}s`);
+    if (segment.utterances > 1) parts.push(`${segment.utterances} 発話まとめ`);
     metrics.textContent = parts.join(" · ");
     body.append(metrics);
   }

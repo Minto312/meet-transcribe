@@ -6,7 +6,7 @@ members = ["app"]
 
 [package]
 name = "meet-transcribe"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Real-time Japanese transcription of Windows desktop audio on an Intel NPU, via OpenVINO GenAI Whisper (NPU/iGPU/CPU switchable)"
